@@ -176,18 +176,17 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
 static bool subaru_tx_hook(const CANPacket_t *msg) {
   const TorqueSteeringLimits SUBARU_STEERING_LIMITS      = SUBARU_STEERING_LIMITS_GENERATOR(2047, 50, 70);
   const TorqueSteeringLimits SUBARU_GEN2_STEERING_LIMITS = SUBARU_STEERING_LIMITS_GENERATOR(1500, 35, 50);
+  // Based on SUBARU_ASCENT (most restrictive slip factor)
   const AngleSteeringLimits SUBARU_ANGLE_STEERING_LIMITS = {
-    .max_angle = 545 * 100,
+    .max_angle = 190 * 100,
     .angle_deg_to_can = 100.,
-    .angle_rate_up_lookup = {
-      {0.0, 5.0, 35.0},
-      {5.0, 0.8, 0.15},
-    },
-    .angle_rate_down_lookup = {
-      {0.0, 5.0, 35.0},
-      {5.0, 0.8, 0.15},
-    },
-    .frequency = 50,
+    .frequency = 50U,
+  };
+
+  const AngleSteeringParams SUBARU_STEERING_PARAMS = {
+    .slip_factor = -0.000580374471400815,
+    .steer_ratio = 13.5,
+    .wheelbase = 2.89,
   };
 
   const LongitudinalLimits SUBARU_LONG_LIMITS = {
@@ -219,7 +218,7 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
     desired_angle = -1 * to_signed(desired_angle, 17);
     bool lkas_request = GET_BIT(msg, 12U);
 
-    violation |= steer_angle_cmd_checks(desired_angle, lkas_request, SUBARU_ANGLE_STEERING_LIMITS);
+    violation |= steer_angle_cmd_checks_vm(desired_angle, lkas_request, SUBARU_ANGLE_STEERING_LIMITS, SUBARU_STEERING_PARAMS);
   }
 
   // check es_brake brake_pressure limits

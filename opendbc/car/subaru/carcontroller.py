@@ -1,10 +1,11 @@
 import numpy as np
 from opendbc.can import CANPacker
 from opendbc.car import Bus, make_tester_present_msg, structs
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
+from opendbc.car.lateral import apply_center_deadzone, apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.vehicle_model import VehicleModel
 from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
@@ -14,20 +15,16 @@ MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 MADS_ONLY_MIN_SPEED = 2.24  # m/s (5 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 MADS_MANUAL_OVERRIDE_RELEASE_FRAMES = 30  # 0.3 s at 100 Hz
-LOW_SPEED_SMOOTH_MAX_SPEED = 4.4704  # m/s (10 mph)
-LOW_SPEED_SMOOTH_DEADBAND_MAX = 0.8  # deg at 0 mph
-LOW_SPEED_SMOOTH_ALPHA_MIN = 0.35  # blend factor at 0 mph
-LOW_SPEED_STRAIGHT_STABILITY_TARGET_MAX = 3.5  # deg, keep narrowly scoped to straight-ahead chatter
-LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX = 6.0  # deg, bypass real turning maneuvers
-LOW_SPEED_STRAIGHT_CENTER_HOLD_TARGET_MAX = 1.0  # deg, hold near-center targets steady
-LOW_SPEED_STRAIGHT_CENTER_HOLD_STEER_MAX = 2.5  # deg, measured wheel angle window for center hold
-LOW_SPEED_STRAIGHT_SIGN_RELEASE_TARGET = 2.0  # deg, allow small opposite-sign moves only after persistence
-LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES = 5  # 50 ms at 100 Hz
-LOW_SPEED_STRAIGHT_SIGN_EPSILON = 0.05  # deg, ignore numerical noise around zero
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_SPEED = 2.7  # m/s (6 mph)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE = 135.0  # deg
 POST_NON_DRIVE_COOLDOWN_MAX_SPEED = 4.4704  # m/s (10 mph)
 POST_NON_DRIVE_COOLDOWN_FRAMES = 150  # 1.5 s at 100 Hz
+
+
+def get_safety_CP():
+  # Use the Ascent for lateral limiting to match safety (most restrictive slip factor)
+  from opendbc.car.subaru.interface import CarInterface
+  return CarInterface.get_non_essential_params("SUBARU_ASCENT")
 
 
 class CarController(CarControllerBase, SnGCarController):
@@ -41,76 +38,12 @@ class CarController(CarControllerBase, SnGCarController):
     self.steer_rate_counter = 0
     self.last_non_drive_frame = -POST_NON_DRIVE_COOLDOWN_FRAMES
     self.last_mads_manual_override_frame = -MADS_MANUAL_OVERRIDE_RELEASE_FRAMES
-    self.low_speed_straight_pending_direction = 0
-    self.low_speed_straight_pending_frames = 0
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
-  def _get_low_speed_smoothed_angle_target(self, raw_target, v_ego):
-    speed_factor = np.clip(v_ego / LOW_SPEED_SMOOTH_MAX_SPEED, 0.0, 1.0)
-    deadband = (1.0 - speed_factor) * LOW_SPEED_SMOOTH_DEADBAND_MAX
-    delta = raw_target - self.apply_angle_last
-
-    if abs(delta) <= deadband:
-      return self.apply_angle_last
-
-    delta = delta - deadband if delta > 0 else delta + deadband
-    alpha = np.interp(v_ego, [0.0, LOW_SPEED_SMOOTH_MAX_SPEED], [LOW_SPEED_SMOOTH_ALPHA_MIN, 1.0])
-    return self.apply_angle_last + alpha * delta
-
-  def _reset_low_speed_straight_stability(self):
-    self.low_speed_straight_pending_direction = 0
-    self.low_speed_straight_pending_frames = 0
-
-  @staticmethod
-  def _angle_direction(angle: float) -> int:
-    if angle > LOW_SPEED_STRAIGHT_SIGN_EPSILON:
-      return 1
-    if angle < -LOW_SPEED_STRAIGHT_SIGN_EPSILON:
-      return -1
-    return 0
-
-  def _get_low_speed_stable_angle_target(self, raw_target: float, CS) -> float:
-    if CS.out.vEgoRaw >= LOW_SPEED_SMOOTH_MAX_SPEED or CS.out.standstill or CS.out.steeringPressed:
-      self._reset_low_speed_straight_stability()
-      return raw_target
-
-    measured_angle = CS.out.steeringAngleDeg
-    if abs(raw_target) > LOW_SPEED_STRAIGHT_STABILITY_TARGET_MAX or \
-       abs(measured_angle) > LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX or \
-       abs(self.apply_angle_last) > LOW_SPEED_STRAIGHT_STABILITY_STEER_MAX:
-      self._reset_low_speed_straight_stability()
-      return raw_target
-
-    if abs(raw_target) <= LOW_SPEED_STRAIGHT_CENTER_HOLD_TARGET_MAX and \
-       abs(measured_angle) <= LOW_SPEED_STRAIGHT_CENTER_HOLD_STEER_MAX:
-      self._reset_low_speed_straight_stability()
-      return 0.0
-
-    target_direction = self._angle_direction(raw_target)
-    current_direction = self._angle_direction(self.apply_angle_last)
-    if target_direction == 0:
-      self._reset_low_speed_straight_stability()
-      return 0.0
-
-    needs_release = abs(raw_target) < LOW_SPEED_STRAIGHT_SIGN_RELEASE_TARGET and \
-      (current_direction == 0 or current_direction != target_direction)
-    if not needs_release:
-      self._reset_low_speed_straight_stability()
-      return raw_target
-
-    if self.low_speed_straight_pending_direction != target_direction:
-      self.low_speed_straight_pending_direction = target_direction
-      self.low_speed_straight_pending_frames = 1
-    else:
-      self.low_speed_straight_pending_frames += 1
-
-    if self.low_speed_straight_pending_frames < LOW_SPEED_STRAIGHT_SIGN_RELEASE_FRAMES:
-      return 0.0 if current_direction == 0 else self.apply_angle_last
-
-    self._reset_low_speed_straight_stability()
-    return raw_target
+    if CP.flags & SubaruFlags.LKAS_ANGLE:
+      self.VM = VehicleModel(get_safety_CP())
 
   def handle_angle_lateral(self, CC, CS):
     # Angle-LKAS can hard fault during low-speed MADS lateral-only maneuvers.
@@ -136,28 +69,16 @@ class CarController(CarControllerBase, SnGCarController):
       not CS.out.standstill and not low_speed_high_angle_guard and not post_non_drive_cooldown_guard and \
       not mads_manual_override
 
-    steer_target = CC.actuators.steeringAngleDeg
-    if lkas_request and CS.out.vEgoRaw < LOW_SPEED_SMOOTH_MAX_SPEED:
-      # Low-speed damping to reduce left-right command chatter while retaining large steering authority.
-      steer_target = self._get_low_speed_smoothed_angle_target(steer_target, CS.out.vEgoRaw)
-      steer_target = self._get_low_speed_stable_angle_target(steer_target, CS)
-    else:
-      self._reset_low_speed_straight_stability()
+    apply_angle = CC.actuators.steeringAngleDeg
+    # Heavy steering oscillation at low speeds — apply speed-dependent deadzone
+    if lkas_request and CS.out.vEgoRaw < 10.0:
+      deadzone = np.interp(CS.out.vEgoRaw, [2., 10.0], [6.0, 3.0])
+      apply_angle = self.apply_angle_last + apply_center_deadzone(apply_angle - self.apply_angle_last, deadzone)
 
-    apply_steer = apply_std_steer_angle_limits(
-      steer_target,
-      self.apply_angle_last,
-      CS.out.vEgoRaw,
-      CS.out.steeringAngleDeg,
-      lkas_request,
-      self.p.ANGLE_LIMITS,
-    )
+    self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
+                                                        CS.out.steeringAngleDeg, lkas_request, CarControllerParams, self.VM)
 
-    if not lkas_request:
-      apply_steer = CS.out.steeringAngleDeg
-
-    self.apply_angle_last = apply_steer
-    return subarucan.create_steering_control_angle(self.packer, apply_steer, lkas_request)
+    return subarucan.create_steering_control_angle(self.packer, self.apply_angle_last, lkas_request)
 
   def handle_torque_lateral(self, CC, CS):
     apply_torque = int(round(CC.actuators.torque * self.p.STEER_MAX))

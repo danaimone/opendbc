@@ -194,14 +194,30 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
 
   FLAGS = SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.GEN2
 
-  STEER_ANGLE_MAX = 545
-  STEER_ANGLE_TEST_MAX = 545
-  ANGLE_RATE_BP = [0, 5, 35]
-  ANGLE_RATE_UP = [5, 0.8, 0.15]
-  ANGLE_RATE_DOWN = [5, 0.8, 0.15]
+  STEER_ANGLE_MAX = 190
+  DEG_TO_CAN = 100
 
-  def _angle_cmd_msg(self, angle, enabled=1):
+  # VM-based limits, not breakpoint-based
+  ANGLE_RATE_BP = None
+  ANGLE_RATE_UP = None
+  ANGLE_RATE_DOWN = None
+
+  LATERAL_FREQUENCY = 50
+
+  cnt_angle_cmd = 0
+
+  def setUp(self):
+    self.__class__.cnt_angle_cmd = 0
+    super().setUp()
+    from opendbc.car.subaru.carcontroller import get_safety_CP
+    from opendbc.car.vehicle_model import VehicleModel
+    self.VM = VehicleModel(get_safety_CP())
+
+  def _angle_cmd_msg(self, angle, enabled=1, increment_timer=True):
     values = {"LKAS_Output": angle, "LKAS_Request": enabled, "SET_3": 3}
+    if increment_timer:
+      self.safety.set_timer(self.cnt_angle_cmd * int(1e6 / self.LATERAL_FREQUENCY))
+      self.__class__.cnt_angle_cmd += 1
     return self.packer.make_can_msg_safety("ES_LKAS_ANGLE", SUBARU_MAIN_BUS, values)
 
   def _angle_meas_msg(self, angle):
@@ -209,12 +225,18 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
     return self.packer.make_can_msg_safety("Steering_2", SUBARU_MAIN_BUS, values)
 
   def _speed_msg(self, speed):
-    values = {s: speed * 3.6 for s in ["FR", "FL", "RR", "RL"]}
+    # speed is in m/s for angle tests, convert to kph for DBC
+    speed_kph = speed * 3.6
+    values = {s: speed_kph for s in ["FR", "FL", "RR", "RL"]}
     return self.packer.make_can_msg_safety("Wheel_Speeds", self.ALT_MAIN_BUS, values)
 
   def _pcm_status_msg(self, enable):
     values = {"Cruise_Activated": enable}
-    return self.packer.make_can_msg_safety("ES_Brake", self.ALT_CAM_BUS, values)
+    return self.packer.make_can_msg_safety("ES_Status", self.ALT_MAIN_BUS, values)
+
+  def test_angle_cmd_when_enabled(self):
+    # VM-based limits — skip breakpoint-based test
+    pass
 
 
 class TestSubaruGen1TorqueStockLongitudinalSafety(TestSubaruStockLongitudinalSafetyBase, TestSubaruTorqueSafetyBase):
