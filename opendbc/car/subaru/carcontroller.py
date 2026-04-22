@@ -15,6 +15,7 @@ MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 MADS_ONLY_MIN_SPEED = 2.24  # m/s (5 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 MADS_MANUAL_OVERRIDE_RELEASE_FRAMES = 30  # 0.3 s at 100 Hz
+LOW_SPEED_ANGLE_HOLD_SPEED = 2.24  # m/s (5 mph) — below this, freeze the commanded angle
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_SPEED = 2.7  # m/s (6 mph)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE = 135.0  # deg
 POST_NON_DRIVE_COOLDOWN_MAX_SPEED = 4.4704  # m/s (10 mph)
@@ -74,6 +75,14 @@ class CarController(CarControllerBase, SnGCarController):
     if lkas_request and CS.out.vEgoRaw < 10.0:
       deadzone = np.interp(CS.out.vEgoRaw, [2., 10.0], [6.0, 3.0])
       apply_angle = self.apply_angle_last + apply_center_deadzone(apply_angle - self.apply_angle_last, deadzone)
+
+    # Below ~5 mph, the lateral planner can produce oscillating angle commands while the EPS is
+    # already heavily loaded, which has caused permanent EPS faults. Freeze the commanded angle
+    # below LOW_SPEED_ANGLE_HOLD_SPEED so LKAS keeps whatever wheel position it had — the driver
+    # retains manual steering authority, and LKAS resumes tracking once speed rises. This keeps
+    # LKAS engaged through stop-lights / stop-and-go without reacting to planner noise.
+    if lkas_request and CS.out.vEgoRaw < LOW_SPEED_ANGLE_HOLD_SPEED:
+      apply_angle = self.apply_angle_last
 
     self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
                                                         CS.out.steeringAngleDeg, lkas_request, CarControllerParams, self.VM)
