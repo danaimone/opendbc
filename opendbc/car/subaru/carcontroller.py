@@ -20,7 +20,9 @@ ANGLE_ENGAGE_RATE_SETTLE_FRAMES = 30  # 0.3 s at 100 Hz — wheel must be settle
 MADS_ONLY_MIN_SPEED = 2.24  # m/s (5 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 MADS_MANUAL_OVERRIDE_RELEASE_FRAMES = 30  # 0.3 s at 100 Hz
-LOW_SPEED_ANGLE_HOLD_SPEED = 2.24  # m/s (5 mph) — below this, freeze the commanded angle
+LOW_SPEED_ANGLE_HOLD_SPEED = 2.24  # m/s (5 mph) — below this, slew-limit the commanded angle
+LOW_SPEED_MIN_ANGLE_DELTA = 0.3    # deg/cmd step near standstill (~15 deg/s at 50 Hz), gentlest where EPS is most fault-prone
+LOW_SPEED_MAX_ANGLE_DELTA = 3.0    # deg/cmd step approaching the threshold (~150 deg/s at 50 Hz)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_SPEED = 2.7  # m/s (6 mph)
 LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE = 135.0  # deg
 POST_NON_DRIVE_COOLDOWN_MAX_SPEED = 4.4704  # m/s (10 mph)
@@ -97,12 +99,17 @@ class CarController(CarControllerBase, SnGCarController):
       apply_angle = self.apply_angle_last + apply_center_deadzone(apply_angle - self.apply_angle_last, deadzone)
 
     # Below ~5 mph, the lateral planner can produce oscillating angle commands while the EPS is
-    # already heavily loaded, which has caused permanent EPS faults. Freeze the commanded angle
-    # below LOW_SPEED_ANGLE_HOLD_SPEED so LKAS keeps whatever wheel position it had — the driver
-    # retains manual steering authority, and LKAS resumes tracking once speed rises. This keeps
-    # LKAS engaged through stop-lights / stop-and-go without reacting to planner noise.
+    # already heavily loaded, which has caused permanent EPS faults. Rather than freezing the
+    # wheel outright (dead steering plus a snap when crossing the threshold on a MADS resume),
+    # track the target under a speed-scaled slew limit: gentlest near standstill where the EPS
+    # is most fault-prone, ramping up toward the threshold so the handoff to the normal limiter
+    # is seamless. Fast oscillation that faults the EPS is bounded out, but LKAS keeps following
+    # the path through stop-and-go / low-speed resume instead of going dead.
     if lkas_request and CS.out.vEgoRaw < LOW_SPEED_ANGLE_HOLD_SPEED:
-      apply_angle = self.apply_angle_last
+      low_speed_delta = float(np.interp(CS.out.vEgoRaw, [0.0, LOW_SPEED_ANGLE_HOLD_SPEED],
+                                        [LOW_SPEED_MIN_ANGLE_DELTA, LOW_SPEED_MAX_ANGLE_DELTA]))
+      apply_angle = float(np.clip(apply_angle, self.apply_angle_last - low_speed_delta,
+                                  self.apply_angle_last + low_speed_delta))
 
     self.apply_angle_last = apply_steer_angle_limits_vm(apply_angle, self.apply_angle_last, CS.out.vEgoRaw,
                                                         CS.out.steeringAngleDeg, lkas_request, CarControllerParams, self.VM)
