@@ -12,6 +12,11 @@ from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
+# The Subaru angle EPS hard-faults if the first LKAS command is issued while the steering
+# wheel is rotating (independent of speed, accel, and wheel position). The torque path
+# already guards against this via common_fault_avoidance; the angle path had no equivalent.
+ANGLE_ENGAGE_MAX_STEER_RATE = 25.0  # deg/s — same EPS hardware as torque-path MAX_STEER_RATE
+ANGLE_ENGAGE_RATE_SETTLE_FRAMES = 30  # 0.3 s at 100 Hz — wheel must be settled before engaging
 MADS_ONLY_MIN_SPEED = 2.24  # m/s (5 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 MADS_MANUAL_OVERRIDE_RELEASE_FRAMES = 30  # 0.3 s at 100 Hz
@@ -39,6 +44,8 @@ class CarController(CarControllerBase, SnGCarController):
     self.steer_rate_counter = 0
     self.last_non_drive_frame = -POST_NON_DRIVE_COOLDOWN_FRAMES
     self.last_mads_manual_override_frame = -MADS_MANUAL_OVERRIDE_RELEASE_FRAMES
+    self.lkas_request_last = False
+    self.last_high_steer_rate_frame = -ANGLE_ENGAGE_RATE_SETTLE_FRAMES
 
     self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
@@ -66,9 +73,22 @@ class CarController(CarControllerBase, SnGCarController):
       abs(CS.out.steeringAngleDeg) > LOW_SPEED_HIGH_ANGLE_GUARD_MAX_STEER_ANGLE
     post_non_drive_cooldown_guard = CS.out.vEgoRaw < POST_NON_DRIVE_COOLDOWN_MAX_SPEED and \
       (self.frame - self.last_non_drive_frame) < POST_NON_DRIVE_COOLDOWN_FRAMES
-    lkas_request = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and in_drive and \
+    want_lkas = CC.latActive and (CC.enabled or not mads_only or mads_only_ok) and in_drive and \
       not CS.out.standstill and not low_speed_high_angle_guard and not post_non_drive_cooldown_guard and \
       not mads_manual_override
+
+    # Engagement steering-rate guard: the Subaru angle EPS hard-faults if the first LKAS
+    # command is issued while the wheel is rotating (per multiple field reports, independent
+    # of speed/accel/position). Only gate the inactive->active transition — once engaged,
+    # openpilot moves the wheel itself so a nonzero rate is expected and must not disengage.
+    if abs(CS.out.steeringRateDeg) > ANGLE_ENGAGE_MAX_STEER_RATE:
+      self.last_high_steer_rate_frame = self.frame
+    if not self.lkas_request_last:
+      rate_settled = (self.frame - self.last_high_steer_rate_frame) >= ANGLE_ENGAGE_RATE_SETTLE_FRAMES
+      lkas_request = want_lkas and rate_settled
+    else:
+      lkas_request = want_lkas
+    self.lkas_request_last = lkas_request
 
     apply_angle = CC.actuators.steeringAngleDeg
     # Heavy steering oscillation at low speeds — apply speed-dependent deadzone
