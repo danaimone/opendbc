@@ -144,9 +144,9 @@ class LkasAngleStateMachine:
     pre_engage_ok = (self.pre_engage_clean_frames >= PRE_ENGAGE_CLEAN_FRAMES
                      and self.lkas_button_settled >= CAMERA_SETTLE_FRAMES)
 
-    # Stock lane centering only runs with ACC: the EPS hard-faults if LKAS_Request rides through an
-    # ACC-engaged -> off transition, so drop the request at the edge and re-engage via the gates.
-    if self.enabled_last and not CC.enabled:
+    # ACC dropping (e.g. brake) once suspended LKAS, but MADS lateral is independent of ACC: only
+    # suspend when lateral is actually ending, so LKAS stays engaged through a brake while MADS holds it.
+    if self.enabled_last and not CC.enabled and not CC.latActive:
       self.suspended = True
       self.below_release_count = 0
     self.enabled_last = CC.enabled
