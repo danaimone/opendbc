@@ -25,6 +25,9 @@ PRE_ENGAGE_CLEAN_FRAMES = 5              # ~100 ms
 DISENGAGE_TAPER_FRAMES = 8               # ~160 ms; keeps LKAS_Request from edge-falling
 CAMERA_SETTLE_FRAMES = 50                # ~1 s; raising LKAS_Request inside a camera LKAS-state transition hard-faults the EPS
 
+# ES_LKAS_State (10 Hz dash) must reach the EPS before LKAS_Request (50 Hz) rises, or the EPS hard-faults.
+ENGAGE_DASH_LEAD_FRAMES = 8             # ~160 ms; ES_LKAS_State must lead LKAS_Request on the engage edge
+
 # Roll compensation in actuators.steeringAngleDeg diverges as v -> 0 and cranks the wheel at stops on
 # crowned roads; fade to a roll-free target rebuilt from actuators.curvature when approaching a stop.
 ROLL_COMP_FADE_BP = [2.0, 8.0]           # m/s
@@ -96,6 +99,8 @@ class LkasAngleStateMachine:
     self.pre_engage_clean_frames = 0
     self.disengage_taper_remaining = 0
     self.active_last = False
+    self.dash_active = False
+    self.dash_active_frames = 0
     self.enabled_last = False
     self.planner_angle_filt = 0.0
     self.last_lkas_button = 0
@@ -175,9 +180,17 @@ class LkasAngleStateMachine:
     elif self.disengage_taper_remaining > 0:
       self.disengage_taper_remaining -= 1
 
-    active = want_active or (self.disengage_taper_remaining > 0 and not self.suspended)
+    # dash advertises intent (ES_LKAS_State); request is held back a lead so the dash reaches the EPS first.
+    dash_active = want_active or (self.disengage_taper_remaining > 0 and not self.suspended)
 
-    if active:
+    if dash_active:
+      self.dash_active_frames = min(self.dash_active_frames + 1, ENGAGE_DASH_LEAD_FRAMES)
+    else:
+      self.dash_active_frames = 0
+
+    request_active = dash_active and (self.active_last or self.dash_active_frames >= ENGAGE_DASH_LEAD_FRAMES)
+
+    if request_active:
       # Stage 1: LPF on the planner target (noise reject).
       alpha = np.interp(CS.out.vEgoRaw, PLANNER_ANGLE_LP_ALPHA_BP, PLANNER_ANGLE_LP_ALPHA_V)
       self.planner_angle_filt = alpha * target_angle + (1.0 - alpha) * self.planner_angle_filt
@@ -188,9 +201,11 @@ class LkasAngleStateMachine:
       # Stage 2: jerk-limited trajectory (accel bound also shapes engage pull-in).
       out_angle = self.planner.update(target, CS.out.vEgoRaw)
     else:
+      # inactive or holding for the lead: pin to measured so LKAS_Request rises from zero error, not a step
       self.planner_angle_filt = CS.out.steeringAngleDeg
       self.planner.reset(CS.out.steeringAngleDeg)
       out_angle = CS.out.steeringAngleDeg
 
-    self.active_last = active
-    return out_angle, active
+    self.dash_active = dash_active
+    self.active_last = request_active
+    return out_angle, request_active
