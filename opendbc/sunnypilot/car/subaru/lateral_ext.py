@@ -25,8 +25,8 @@ PRE_ENGAGE_CLEAN_FRAMES = 5              # ~100 ms
 DISENGAGE_TAPER_FRAMES = 8               # ~160 ms; keeps LKAS_Request from edge-falling
 CAMERA_SETTLE_FRAMES = 50                # ~1 s; raising LKAS_Request inside a camera LKAS-state transition hard-faults the EPS
 
-# ES_LKAS_State (10 Hz dash) must reach the EPS before LKAS_Request (50 Hz) rises, or the EPS hard-faults.
-ENGAGE_DASH_LEAD_FRAMES = 8             # ~160 ms; ES_LKAS_State must lead LKAS_Request on the engage edge
+# 50 Hz ticks; must cover worst-case 10 Hz dash phase so >=2 dash frames reach the EPS before LKAS_Request rises, else hard-fault
+ENGAGE_DASH_LEAD_FRAMES = 16
 
 # Roll compensation in actuators.steeringAngleDeg diverges as v -> 0 and cranks the wheel at stops on
 # crowned roads; fade to a roll-free target rebuilt from actuators.curvature when approaching a stop.
