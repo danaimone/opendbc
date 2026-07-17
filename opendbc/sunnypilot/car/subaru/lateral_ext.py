@@ -25,8 +25,8 @@ PRE_ENGAGE_CLEAN_FRAMES = 5              # ~100 ms
 DISENGAGE_TAPER_FRAMES = 8               # ~160 ms; keeps LKAS_Request from edge-falling
 CAMERA_SETTLE_FRAMES = 50                # ~1 s; raising LKAS_Request inside a camera LKAS-state transition hard-faults the EPS
 
-# 50 Hz ticks; must cover worst-case 10 Hz dash phase so >=2 dash frames reach the EPS before LKAS_Request rises, else hard-fault
-ENGAGE_DASH_LEAD_FRAMES = 16
+# short dash lead before LKAS_Request rises; engage is latched so the request always follows and the dash is never stranded active
+ENGAGE_DASH_LEAD_FRAMES = 8
 
 # Roll compensation in actuators.steeringAngleDeg diverges as v -> 0 and cranks the wheel at stops on
 # crowned roads; fade to a roll-free target rebuilt from actuators.curvature when approaching a stop.
@@ -101,6 +101,8 @@ class LkasAngleStateMachine:
     self.active_last = False
     self.dash_active = False
     self.dash_active_frames = 0
+    self.dash_lead_frames = 0
+    self.engaged = False
     self.enabled_last = False
     self.planner_angle_filt = 0.0
     self.last_lkas_button = 0
@@ -165,9 +167,13 @@ class LkasAngleStateMachine:
         self.suspended = True
         self.below_release_count = 0
 
-    want_active = CC.latActive and not self.suspended
-    if want_active and not self.active_last and not pre_engage_ok:
-      want_active = False
+    # latch the engage once the gates pass so gate flicker (LKAS-button camera-state transitions) can't drop it mid-lead and strand an active dash with no LKAS_Request -> EPS LKAS fault
+    raw_want = CC.latActive and not self.suspended
+    if raw_want and (self.active_last or pre_engage_ok):
+      self.engaged = True
+    if not raw_want:
+      self.engaged = False
+    want_active = self.engaged
 
     if want_active and not self.active_last:
       self.planner_angle_filt = CS.out.steeringAngleDeg
@@ -189,6 +195,12 @@ class LkasAngleStateMachine:
       self.dash_active_frames = 0
 
     request_active = dash_active and (self.active_last or self.dash_active_frames >= ENGAGE_DASH_LEAD_FRAMES)
+
+    # safety net: EPS throws a LKAS fault if ES_LKAS_State advertises active without LKAS_Request, so never let the dash lead longer than the bounded engage lead
+    self.dash_lead_frames = self.dash_lead_frames + 1 if (dash_active and not request_active) else 0
+    if self.dash_lead_frames > ENGAGE_DASH_LEAD_FRAMES + 2:
+      dash_active = False
+      self.engaged = False
 
     if request_active:
       # Stage 1: LPF on the planner target (noise reject).
