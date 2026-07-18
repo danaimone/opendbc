@@ -33,10 +33,9 @@ ENGAGE_DASH_LEAD_FRAMES = 8
 ROLL_COMP_FADE_BP = [2.0, 8.0]           # m/s
 ROLL_COMP_FADE_V  = [0.0, 1.0]
 
-# Noise filter on the planner target. Heavy below ~10 mph where the model target flails
-# (its v^2 curvature limits go vacuous at creep speed) and EPS jitter propagates as wobble.
+# Noise filter on the planner target; low-speed lag kept small so the highway-learned (lagd MIN_VEGO=15 m/s) scalar steerActuatorDelay isn't under-compensated below 25 mph, which was driving a growing weave
 PLANNER_ANGLE_LP_ALPHA_BP = [0., 4.5, 13., 18., 30.]    # m/s
-PLANNER_ANGLE_LP_ALPHA_V  = [0.06, 0.13, 0.28, 0.33, 0.30]
+PLANNER_ANGLE_LP_ALPHA_V  = [0.16, 0.22, 0.28, 0.33, 0.30]
 
 
 class AnglePlanner:
