@@ -33,9 +33,9 @@ ENGAGE_DASH_LEAD_FRAMES = 8
 ROLL_COMP_FADE_BP = [2.0, 8.0]           # m/s
 ROLL_COMP_FADE_V  = [0.0, 1.0]
 
-# Noise filter on the planner target; heavy at creep to kill jitter, light through the 8-15 mph weave band so the highway-learned delay isn't under-compensated there
-PLANNER_ANGLE_LP_ALPHA_BP = [0., 2.5, 3.5, 13., 18., 30.]    # m/s
-PLANNER_ANGLE_LP_ALPHA_V  = [0.07, 0.11, 0.22, 0.28, 0.33, 0.30]
+# Noise filter on the planner target; heavy at creep to kill jitter, lighter through 8-29 mph to cut LPF lag and damp the weave the highway-learned delay under-compensates
+PLANNER_ANGLE_LP_ALPHA_BP = [0., 2.5, 3.5, 9., 18., 30.]    # m/s
+PLANNER_ANGLE_LP_ALPHA_V  = [0.07, 0.11, 0.24, 0.28, 0.33, 0.30]
 
 
 class AnglePlanner:
