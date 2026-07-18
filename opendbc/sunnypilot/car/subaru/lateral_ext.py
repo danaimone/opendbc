@@ -56,6 +56,15 @@ class AnglePlanner:
   ERR_SCALE_BP = [1.5, 15.0]                         # deg wheel
   ERR_SCALE_V  = [1.0, 3.0]
 
+  # Scale peak rate up with error too, so sharp turns slew faster; small/noisy errors keep the gentle base rate.
+  RATE_ERR_SCALE_BP = [3.0, 15.0]                    # deg wheel
+  RATE_ERR_SCALE_V  = [1.0, 2.5]
+
+  # Safety angle-rate ceiling (mirrors CarControllerParams ANGLE_RATE_LIMIT) so the boost can't exceed the outer clip / panda.
+  SAFETY_RATE_BP   = [0., 1.5, 5., 15., 35.]         # m/s
+  SAFETY_RATE_UP   = [1.2, 1.0, 0.72, 0.54, 0.18]    # deg/frame
+  SAFETY_RATE_DOWN = [1.7, 1.5, 1.05, 0.80, 0.22]    # deg/frame
+
   def __init__(self):
     self.pos = 0.0
     self.vel = 0.0
@@ -70,7 +79,10 @@ class AnglePlanner:
     # moving away from center uses UP limits, unwinding toward center uses the looser DOWN limits
     winding_up = self.pos * np.sign(err) >= 0.
     rate_v = self.MAX_RATE_UP_V if winding_up else self.MAX_RATE_DOWN_V
-    max_rate       = float(np.interp(v_ego, self.MAX_RATE_BP,  rate_v))
+    base_max_rate  = float(np.interp(v_ego, self.MAX_RATE_BP,  rate_v))
+    rate_boost     = float(np.interp(abs(err), self.RATE_ERR_SCALE_BP, self.RATE_ERR_SCALE_V))
+    safety_rate_v  = self.SAFETY_RATE_UP if winding_up else self.SAFETY_RATE_DOWN
+    max_rate       = min(base_max_rate * rate_boost, float(np.interp(v_ego, self.SAFETY_RATE_BP, safety_rate_v)))
     base_max_accel = float(np.interp(v_ego, self.MAX_ACCEL_BP, self.MAX_ACCEL_V))
     max_accel = base_max_accel * float(np.interp(abs(err), self.ERR_SCALE_BP, self.ERR_SCALE_V))
 
