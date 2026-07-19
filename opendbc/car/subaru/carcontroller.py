@@ -23,6 +23,8 @@ class CarController(CarControllerBase, SnGCarController):
     self.apply_angle_last = 0.0
     self.angle_sm = LkasAngleStateMachine(CP)
     self.es_disengage_frames = 1000
+    self.dash_no_req_frames = 0
+    self.dash_active_safe = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -56,6 +58,9 @@ class CarController(CarControllerBase, SnGCarController):
   def handle_angle_lateral(self, CC, CS):
     # sunnypilot: override / engage shaping + jerk-limited planner; `active` stays True during the disengage taper.
     planner_angle, active = self.angle_sm.update(CC, CS)
+    # hard EPS-invariant guard: ES_LKAS_State must never advertise active without LKAS_Request beyond the bounded engage lead, or the EPS throws a LKAS fault
+    self.dash_no_req_frames = self.dash_no_req_frames + 1 if (self.angle_sm.dash_active and not active) else 0
+    self.dash_active_safe = self.angle_sm.dash_active and self.dash_no_req_frames <= 10
     apply_angle = apply_std_steer_angle_limits(planner_angle, self.apply_angle_last,
                                                CS.out.vEgoRaw, CS.out.steeringAngleDeg,
                                                active, self.p.ANGLE_LIMITS)
@@ -114,8 +119,8 @@ class CarController(CarControllerBase, SnGCarController):
 
     else:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
-        # dash leads the request so an active-dash frame reaches the EPS before LKAS_Request rises
-        lkas_dash_active = self.angle_sm.dash_active and not CS.out.steerFaultPermanent
+        # dash leads the request so an active-dash frame reaches the EPS before LKAS_Request rises; dash_active_safe caps the lead so it's never stranded active without the request
+        lkas_dash_active = self.dash_active_safe and not CS.out.steerFaultPermanent
       else:
         # torque cars: hold the LKAS dash bit briefly after ACC disengage so MADS-only doesn't flicker it
         if CC.enabled:
