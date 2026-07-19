@@ -23,7 +23,6 @@ MADS_ONLY_MAX_STEER_ANGLE = 120          # deg
 
 PRE_ENGAGE_CLEAN_FRAMES = 5              # ~100 ms
 DISENGAGE_TAPER_FRAMES = 8               # ~160 ms; keeps LKAS_Request from edge-falling
-CAMERA_SETTLE_FRAMES = 50                # ~1 s; raising LKAS_Request inside a camera LKAS-state transition hard-faults the EPS
 
 # short dash lead before LKAS_Request rises; engage is latched so the request always follows and the dash is never stranded active
 ENGAGE_DASH_LEAD_FRAMES = 8
@@ -108,12 +107,9 @@ class LkasAngleStateMachine:
     self.active_last = False
     self.dash_active = False
     self.dash_active_frames = 0
-    self.dash_lead_frames = 0
     self.engaged = False
     self.enabled_last = False
     self.planner_angle_filt = 0.0
-    self.last_lkas_button = 0
-    self.lkas_button_settled = CAMERA_SETTLE_FRAMES
     self.planner = AnglePlanner(angle_limits)
 
   def _target_angle(self, CC, CS) -> float:
@@ -137,21 +133,12 @@ class LkasAngleStateMachine:
                      and abs(target_angle - CS.out.steeringAngleDeg) < RESUME_MAX_TARGET_ERR
                      and not extreme_angle_mads_only)
 
-    # camera-settle gate: block fresh engagement until the camera's LKAS state has been stable ~1 s
-    lkas_button = int(getattr(CS, 'lkas_button', 0))
-    if lkas_button != self.last_lkas_button:
-      self.lkas_button_settled = 0
-      self.last_lkas_button = lkas_button
-    else:
-      self.lkas_button_settled = min(self.lkas_button_settled + 1, CAMERA_SETTLE_FRAMES)
-
-    # pre-engage clean-frame gate
+    # pre-engage clean-frame gate: require a clean driver handoff before a fresh engage
     if handoff_clear:
       self.pre_engage_clean_frames = min(self.pre_engage_clean_frames + 1, PRE_ENGAGE_CLEAN_FRAMES)
     else:
       self.pre_engage_clean_frames = 0
-    pre_engage_ok = (self.pre_engage_clean_frames >= PRE_ENGAGE_CLEAN_FRAMES
-                     and self.lkas_button_settled >= CAMERA_SETTLE_FRAMES)
+    pre_engage_ok = self.pre_engage_clean_frames >= PRE_ENGAGE_CLEAN_FRAMES
 
     # ACC dropping (e.g. brake) once suspended LKAS, but MADS lateral is independent of ACC: only
     # suspend when lateral is actually ending, so LKAS stays engaged through a brake while MADS holds it.
@@ -202,12 +189,6 @@ class LkasAngleStateMachine:
       self.dash_active_frames = 0
 
     request_active = dash_active and (self.active_last or self.dash_active_frames >= ENGAGE_DASH_LEAD_FRAMES)
-
-    # safety net: EPS throws a LKAS fault if ES_LKAS_State advertises active without LKAS_Request, so never let the dash lead longer than the bounded engage lead
-    self.dash_lead_frames = self.dash_lead_frames + 1 if (dash_active and not request_active) else 0
-    if self.dash_lead_frames > ENGAGE_DASH_LEAD_FRAMES + 2:
-      dash_active = False
-      self.engaged = False
 
     if request_active:
       # Stage 1: LPF on the planner target (noise reject).
