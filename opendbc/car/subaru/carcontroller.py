@@ -1,7 +1,8 @@
+import math
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, make_tester_present_msg
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
+from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, make_tester_present_msg
+from opendbc.car.lateral import ISO_LATERAL_ACCEL, apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
@@ -13,6 +14,13 @@ from opendbc.sunnypilot.car.subaru.lateral_ext import LkasAngleStateMachine
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
+
+# ISO 11270 lateral acceleration bound, with extra allowance for average banked road since the
+# clamp doesn't know the roll. Applied on top of the rate-table limiter: the 720 deg absolute cap
+# permits full lock for parking, and this bounds the commanded angle by physics at road speeds so
+# a slow ramp can never reach a dangerous lateral acceleration on the highway.
+AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation
+MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~3.6 m/s^2
 
 
 class CarController(CarControllerBase, SnGCarController):
@@ -74,6 +82,12 @@ class CarController(CarControllerBase, SnGCarController):
     apply_angle = apply_std_steer_angle_limits(planner_angle, self.apply_angle_last,
                                                CS.out.vEgoRaw, CS.out.steeringAngleDeg,
                                                active, self.p.ANGLE_LIMITS)
+    if active:
+      # lateral-accel clamp: harmless at parking speeds (bound is far beyond full lock),
+      # binding at road speeds where the rate tables alone don't cap the absolute angle
+      v_ego = max(CS.out.vEgoRaw, 1.0)
+      max_angle = math.degrees(self.angle_sm.VM.get_steer_from_curvature(MAX_LATERAL_ACCEL / (v_ego ** 2), v_ego, 0.0))
+      apply_angle = float(np.clip(apply_angle, -max_angle, max_angle))
     self.apply_angle_last = apply_angle
     return subarucan.create_steering_control_angle(self.packer, apply_angle, active)
 
