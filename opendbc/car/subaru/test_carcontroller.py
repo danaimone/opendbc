@@ -7,6 +7,11 @@ from opendbc.car import structs
 from opendbc.car.subaru.fingerprints import FW_VERSIONS
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.carcontroller import (
+  ANGLE_ENGAGE_MAX_STEER_RATE,
+  ANGLE_ENGAGE_RATE_SETTLE_FRAMES,
+  LOW_SPEED_ANGLE_HOLD_SPEED,
+  LOW_SPEED_MIN_ANGLE_DELTA,
+  LOW_SPEED_MAX_ANGLE_DELTA,
   ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES,
   ANGLE_DRIVER_OVERRIDE_RAMP_SOFTNESS_DEFAULT,
   ANGLE_DRIVER_OVERRIDE_RAMP_FRAMES,
@@ -143,7 +148,8 @@ class TestSubaruCarController(unittest.TestCase):
   def test_angle_driver_override_is_not_controller_inhibited_when_tuning_is_off_in_mads_only(self):
     controller = self._build_controller()
     cs = self._build_cs(9.5, 20.56, steering_pressed=True)
-    cc = self._build_cc(True, False, 19.86)
+    # target far enough from measured to clear the low-speed anti-oscillation deadzone
+    cc = self._build_cc(True, False, 26.0)
 
     controller.apply_angle_last = cs.out.steeringAngleDeg
 
@@ -158,7 +164,8 @@ class TestSubaruCarController(unittest.TestCase):
   def test_angle_driver_override_is_not_controller_inhibited_when_tuning_is_off_in_full_engaged(self):
     controller = self._build_controller()
     cs = self._build_cs(9.5, 20.56, steering_pressed=True)
-    cc = self._build_cc(True, True, 19.86)
+    # target far enough from measured to clear the low-speed anti-oscillation deadzone
+    cc = self._build_cc(True, True, 26.0)
 
     controller.apply_angle_last = cs.out.steeringAngleDeg
 
@@ -579,7 +586,8 @@ class TestSubaruCarController(unittest.TestCase):
   def test_mads_only_just_above_one_mph_allows_angle_lkas(self):
     controller = self._build_controller()
     cs = self._build_cs(MADS_ONLY_MIN_SPEED + 0.01, 10.0)
-    cc = self._build_cc(True, False, 14.0)
+    # target far enough from measured to clear the low-speed anti-oscillation deadzone
+    cc = self._build_cc(True, False, 20.0)
     controller.apply_angle_last = cs.out.steeringAngleDeg
 
     msg = controller.handle_angle_lateral(cc, cs)
@@ -615,7 +623,8 @@ class TestSubaruCarController(unittest.TestCase):
   def test_full_engaged_lateral_ignores_mads_only_low_speed_floor(self):
     controller = self._build_controller()
     cs = self._build_cs(0.22352, 10.0)
-    cc = self._build_cc(True, True, 14.0)
+    # target far enough from measured to clear the low-speed anti-oscillation deadzone
+    cc = self._build_cc(True, True, 20.0)
     controller.apply_angle_last = cs.out.steeringAngleDeg
 
     msg = controller.handle_angle_lateral(cc, cs)
@@ -623,6 +632,66 @@ class TestSubaruCarController(unittest.TestCase):
 
     self.assertNotEqual(msg, inhibited)
     self.assertGreater(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_engagement_blocked_while_wheel_rotating(self):
+    # The angle EPS hard-faults if the first LKAS command arrives while the wheel is moving
+    controller = self._build_controller()
+    cs = self._build_cs(9.5, 0.0, steering_rate_deg=ANGLE_ENGAGE_MAX_STEER_RATE * 4)
+    cc = self._build_cc(True, True, 10.0)
+    controller.apply_angle_last = cs.out.steeringAngleDeg
+
+    controller.handle_angle_lateral(cc, cs)
+
+    self.assertFalse(controller.lkas_request_last)
+    self.assertAlmostEqual(controller.apply_angle_last, cs.out.steeringAngleDeg)
+
+  def test_engagement_allowed_after_rate_settles(self):
+    controller = self._build_controller()
+    cc = self._build_cc(True, True, 10.0)
+    controller.apply_angle_last = 0.0
+
+    # wheel spinning at frame 0 — engagement must be blocked
+    spinning = self._build_cs(9.5, 0.0, steering_rate_deg=ANGLE_ENGAGE_MAX_STEER_RATE * 4)
+    controller.handle_angle_lateral(cc, spinning)
+    self.assertFalse(controller.lkas_request_last)
+
+    # settled for the full window — engagement proceeds
+    settled = self._build_cs(9.5, 0.0, steering_rate_deg=0.0)
+    controller.frame = ANGLE_ENGAGE_RATE_SETTLE_FRAMES
+    controller.handle_angle_lateral(cc, settled)
+
+    self.assertTrue(controller.lkas_request_last)
+    self.assertGreater(controller.apply_angle_last, settled.out.steeringAngleDeg)
+
+  def test_engaged_lkas_not_dropped_by_high_steer_rate(self):
+    # once engaged, openpilot moves the wheel itself — a high rate must not disengage
+    controller = self._build_controller()
+    cc = self._build_cc(True, True, 10.0)
+    controller.apply_angle_last = 0.0
+
+    settled = self._build_cs(9.5, 0.0, steering_rate_deg=0.0)
+    controller.handle_angle_lateral(cc, settled)
+    self.assertTrue(controller.lkas_request_last)
+
+    fast = self._build_cs(9.5, 1.0, steering_rate_deg=ANGLE_ENGAGE_MAX_STEER_RATE * 4)
+    controller.frame += 1
+    controller.handle_angle_lateral(cc, fast)
+    self.assertTrue(controller.lkas_request_last)
+
+  def test_low_speed_slew_limits_angle_step(self):
+    # below ~5 mph the commanded angle must creep toward the target, never jump
+    controller = self._build_controller()
+    v_ego = 1.0
+    cs = self._build_cs(v_ego, 0.0)
+    cc = self._build_cc(True, True, 20.0)
+    controller.apply_angle_last = 0.0
+
+    controller.handle_angle_lateral(cc, cs)
+
+    expected_delta = LOW_SPEED_MIN_ANGLE_DELTA + \
+      (v_ego / LOW_SPEED_ANGLE_HOLD_SPEED) * (LOW_SPEED_MAX_ANGLE_DELTA - LOW_SPEED_MIN_ANGLE_DELTA)
+    self.assertGreater(controller.apply_angle_last, 0.0)
+    self.assertAlmostEqual(controller.apply_angle_last, expected_delta, places=5)
 
   def test_retired_low_speed_tuning_stack_keeps_raw_angle_target(self):
     controller = self._build_controller()

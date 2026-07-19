@@ -1,5 +1,8 @@
 import copy
-from openpilot.common.params import Params
+try:
+  from openpilot.common.params import Params
+except ImportError:  # standalone opendbc (e.g. safety tests) — openpilot only exists in the full tree
+  Params = None
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.carlog import carlog

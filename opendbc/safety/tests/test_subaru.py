@@ -230,16 +230,35 @@ class TestSubaruAngleSafetyBase(TestSubaruSafetyBase, common.AngleSteeringSafety
 
   FLAGS = SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.GEN2
 
-  STEER_ANGLE_MAX = 545
-  # Avoid overflow of ES_LKAS_ANGLE's 17-bit signed field (0.01 deg resolution).
-  STEER_ANGLE_TEST_MAX = 545
-  ANGLE_RATE_BP = [0, 5, 35]
-  ANGLE_RATE_UP = [5, 0.8, 0.15]
-  ANGLE_RATE_DOWN = [5, 0.8, 0.15]
+  STEER_ANGLE_MAX = 190
+  DEG_TO_CAN = 100
 
-  def _angle_cmd_msg(self, angle, enabled=1):
+  # VM-based limits, not breakpoint-based
+  ANGLE_RATE_BP = None
+  ANGLE_RATE_UP = None
+  ANGLE_RATE_DOWN = None
+
+  LATERAL_FREQUENCY = 50
+
+  cnt_angle_cmd = 0
+
+  def setUp(self):
+    self.__class__.cnt_angle_cmd = 0
+    super().setUp()
+    from opendbc.car.subaru.carcontroller import get_safety_CP
+    from opendbc.car.vehicle_model import VehicleModel
+    self.VM = VehicleModel(get_safety_CP())
+
+  def _angle_cmd_msg(self, angle, enabled=1, increment_timer=True):
     values = {"LKAS_Output": angle, "LKAS_Request": enabled, "SET_3": 3}
+    if increment_timer:
+      self.safety.set_timer(self.cnt_angle_cmd * int(1e6 / self.LATERAL_FREQUENCY))
+      self.__class__.cnt_angle_cmd += 1
     return self.packer.make_can_msg_safety("ES_LKAS_ANGLE", SUBARU_MAIN_BUS, values)
+
+  def test_angle_cmd_when_enabled(self):
+    # VM-based limits — skip breakpoint-based test
+    pass
 
   def _angle_meas_msg(self, angle):
     values = {"Steering_Angle": angle}

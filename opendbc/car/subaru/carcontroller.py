@@ -1,12 +1,16 @@
 import numpy as np
-from openpilot.common.params import Params
+try:
+  from openpilot.common.params import Params
+except ImportError:  # standalone opendbc (e.g. safety tests) — openpilot only exists in the full tree
+  Params = None
 from opendbc.can import CANPacker
 from opendbc.car import Bus, make_tester_present_msg, structs
 from opendbc.car.carlog import carlog
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
+from opendbc.car.lateral import apply_center_deadzone, apply_driver_steer_torque_limits, apply_steer_angle_limits_vm, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
+from opendbc.car.vehicle_model import VehicleModel
 
 from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 
@@ -14,6 +18,14 @@ from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
+# The Subaru angle EPS hard-faults if the first LKAS command is issued while the steering
+# wheel is rotating (independent of speed, accel, and wheel position). The torque path
+# already guards against this via common_fault_avoidance; the angle path had no equivalent.
+ANGLE_ENGAGE_MAX_STEER_RATE = 25.0  # deg/s — same EPS hardware as torque-path MAX_STEER_RATE
+ANGLE_ENGAGE_RATE_SETTLE_FRAMES = 30  # 0.3 s at 100 Hz — wheel must be settled before engaging
+LOW_SPEED_ANGLE_HOLD_SPEED = 2.24  # m/s (5 mph) — below this, slew-limit the commanded angle
+LOW_SPEED_MIN_ANGLE_DELTA = 0.3    # deg/cmd step near standstill (~15 deg/s at 50 Hz), gentlest where EPS is most fault-prone
+LOW_SPEED_MAX_ANGLE_DELTA = 3.0    # deg/cmd step approaching the threshold (~150 deg/s at 50 Hz)
 MADS_ONLY_MIN_SPEED = 0.44704  # m/s (1 mph)
 MADS_ONLY_MAX_STEER_ANGLE = 120.0  # deg
 ANGLE_DRIVER_OVERRIDE_HOLD_FRAMES = 10  # steering command frames (~200 ms with STEER_STEP=2)
@@ -40,6 +52,14 @@ SOFT_CAPTURE_LEVEL_PARAMS = [
   (40, 0.05),  # 4 - strong
   (50, 0.02),  # 5 - max
 ]
+
+
+def get_safety_CP():
+  # Use the Ascent for lateral limiting to match safety (most restrictive slip factor)
+  from opendbc.car.subaru.interface import CarInterface
+  return CarInterface.get_non_essential_params("SUBARU_ASCENT")
+
+
 class CarController(CarControllerBase, SnGCarController):
   def __init__(self, dbc_names, CP, CP_SP):
     CarControllerBase.__init__(self, dbc_names, CP, CP_SP)
@@ -72,6 +92,12 @@ class CarController(CarControllerBase, SnGCarController):
     self.angle_driver_override_release_guard_rate_threshold = 0.0
     self.lat_active_prev = False
     self.soft_capture_frame = -(SOFT_CAPTURE_LEVEL_PARAMS[-1][0] + 1)
+    self.lkas_request_last = False
+    self.last_high_steer_rate_frame = -ANGLE_ENGAGE_RATE_SETTLE_FRAMES
+
+    if CP.flags & SubaruFlags.LKAS_ANGLE:
+      self.VM = VehicleModel(get_safety_CP())
+
     self._update_params()
 
   def _log_transition(self, key, value, message):
@@ -297,6 +323,18 @@ class CarController(CarControllerBase, SnGCarController):
     )
     lkas_request = lkas_allowed and not angle_driver_override
 
+    # Engagement steering-rate guard: the Subaru angle EPS hard-faults if the first LKAS
+    # command is issued while the wheel is rotating (per multiple field reports, independent
+    # of speed/accel/position). Only gate the inactive->active transition — once engaged,
+    # openpilot moves the wheel itself so a nonzero rate is expected and must not disengage.
+    if abs(CS.out.steeringRateDeg) > ANGLE_ENGAGE_MAX_STEER_RATE:
+      self.last_high_steer_rate_frame = self.frame
+    engage_rate_settled = True
+    if not self.lkas_request_last:
+      engage_rate_settled = (self.frame - self.last_high_steer_rate_frame) >= ANGLE_ENGAGE_RATE_SETTLE_FRAMES
+      lkas_request = lkas_request and engage_rate_settled
+    self.lkas_request_last = lkas_request
+
     inhibit_reason = "none"
     if not CC.latActive:
       inhibit_reason = "lat_inactive"
@@ -308,6 +346,8 @@ class CarController(CarControllerBase, SnGCarController):
       inhibit_reason = "standstill"
     elif mads_only and not mads_only_ok:
       inhibit_reason = "mads_below_min_speed" if CS.out.vEgoRaw <= MADS_ONLY_MIN_SPEED else "mads_angle_limit"
+    elif not engage_rate_settled:
+      inhibit_reason = "engage_rate_unsettled"
 
     self._log_transition("angle_lkas_inhibit", inhibit_reason, f"angle LKAS inhibit={inhibit_reason}")
     self._log_transition(
@@ -368,16 +408,41 @@ class CarController(CarControllerBase, SnGCarController):
       self.soft_capture_frame = self.frame
     self.lat_active_prev = CC.latActive
 
+    soft_capture_blending = False
     if lkas_request:
-      steer_target = self._get_soft_capture_angle(steer_target, CS.out.steeringAngleDeg)
+      captured_target = self._get_soft_capture_angle(steer_target, CS.out.steeringAngleDeg)
+      soft_capture_blending = captured_target != steer_target
+      steer_target = captured_target
 
-    apply_steer = apply_std_steer_angle_limits(
+    # Heavy steering oscillation at low speeds — apply speed-dependent deadzone.
+    # Skip it while an override-resume ramp or soft capture is actively blending: those
+    # produce small transitional increments by design, which the deadzone would quantize.
+    handoff_blending = manual_override_ramp_active or soft_capture_blending
+    if lkas_request and not handoff_blending and CS.out.vEgoRaw < 10.0:
+      deadzone = np.interp(CS.out.vEgoRaw, [2., 10.0], [6.0, 3.0])
+      steer_target = self.apply_angle_last + apply_center_deadzone(steer_target - self.apply_angle_last, deadzone)
+
+    # Below ~5 mph, the lateral planner can produce oscillating angle commands while the EPS is
+    # already heavily loaded, which has caused permanent EPS faults. Rather than freezing the
+    # wheel outright (dead steering plus a snap when crossing the threshold on a MADS resume),
+    # track the target under a speed-scaled slew limit: gentlest near standstill where the EPS
+    # is most fault-prone, ramping up toward the threshold so the handoff to the normal limiter
+    # is seamless. Fast oscillation that faults the EPS is bounded out, but LKAS keeps following
+    # the path through stop-and-go / low-speed resume instead of going dead.
+    if lkas_request and CS.out.vEgoRaw < LOW_SPEED_ANGLE_HOLD_SPEED:
+      low_speed_delta = float(np.interp(CS.out.vEgoRaw, [0.0, LOW_SPEED_ANGLE_HOLD_SPEED],
+                                        [LOW_SPEED_MIN_ANGLE_DELTA, LOW_SPEED_MAX_ANGLE_DELTA]))
+      steer_target = float(np.clip(steer_target, self.apply_angle_last - low_speed_delta,
+                                   self.apply_angle_last + low_speed_delta))
+
+    apply_steer = apply_steer_angle_limits_vm(
       steer_target,
       self.apply_angle_last,
       CS.out.vEgoRaw,
       CS.out.steeringAngleDeg,
       lkas_request,
-      self.p.ANGLE_LIMITS,
+      self.p,
+      self.VM,
     )
 
     if not lkas_request:
