@@ -12,10 +12,7 @@ bounds both angle rate and angle acceleration on the commanded output.
 import math
 import numpy as np
 
-from opendbc.car import structs
 from opendbc.car.vehicle_model import VehicleModel
-
-GearShifter = structs.CarState.GearShifter
 
 DRIVER_OVERRIDE_TORQUE = 120
 DRIVER_OVERRIDE_TORQUE_RELEASE = 100     # must clear resting-hand torque so light grip doesn't block resume
@@ -182,8 +179,7 @@ class LkasAngleStateMachine:
         self.below_release_count = 0
 
     # latch the engage once the gates pass so gate flicker (LKAS-button camera-state transitions) can't drop it mid-lead and strand an active dash with no LKAS_Request -> EPS LKAS fault
-    # disengage lateral when shifted to Park (drops cleanly through the taper below)
-    raw_want = CC.latActive and not self.suspended and CS.out.gearShifter != GearShifter.park
+    raw_want = CC.latActive and not self.suspended
     if raw_want and (self.active_last or pre_engage_ok):
       self.engaged = True
     if not raw_want:
