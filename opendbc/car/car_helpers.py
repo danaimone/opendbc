@@ -93,8 +93,13 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
   start_time = time.monotonic()
   if not skip_fw_query:
+    # VIN is not required for cache validity — some brands (e.g. Subaru Gen2) do not return VIN
+    # over standard OBD-II, causing VIN_UNKNOWN every boot and forcing a fresh FW query that
+    # can fail if the car's ECUs haven't fully awakened (empty CAN bus 0). The carFw bytes
+    # themselves uniquely identify the vehicle, and can_fingerprint() still runs after this
+    # as an additional safeguard against wrong-car caching.
     if cached_params is not None and cached_params.brand != "mock" and len(cached_params.carFw) > 0 and \
-       cached_params.carVin is not VIN_UNKNOWN and not disable_fw_cache:
+       not disable_fw_cache:
       carlog.warning("Using cached CarParams")
       vin_rx_addr, vin_rx_bus, vin = -1, -1, cached_params.carVin
       car_fw = list(cached_params.carFw)
