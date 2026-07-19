@@ -23,6 +23,7 @@ MADS_ONLY_MAX_STEER_ANGLE = 120          # deg
 
 PRE_ENGAGE_CLEAN_FRAMES = 5              # ~100 ms
 DISENGAGE_TAPER_FRAMES = 8               # ~160 ms; keeps LKAS_Request from edge-falling
+DISENGAGE_DEBOUNCE_FRAMES = 4            # ~80 ms; bridge brief latActive flicker so the engage latch doesn't drop mid-engage
 
 # short dash lead before LKAS_Request rises; engage is latched so the request always follows and the dash is never stranded active
 ENGAGE_DASH_LEAD_FRAMES = 8
@@ -108,6 +109,7 @@ class LkasAngleStateMachine:
     self.dash_active = False
     self.dash_active_frames = 0
     self.engaged = False
+    self.disengage_debounce = 0
     self.enabled_last = False
     self.planner_angle_filt = 0.0
     self.planner = AnglePlanner(angle_limits)
@@ -161,12 +163,19 @@ class LkasAngleStateMachine:
         self.suspended = True
         self.below_release_count = 0
 
-    # latch the engage once the gates pass so gate flicker (LKAS-button camera-state transitions) can't drop it mid-lead and strand an active dash with no LKAS_Request -> EPS LKAS fault
+    # latch the engage; debounce brief latActive flicker so dash_active never drops mid-engage (a drop resets the downstream guard and strands the dash -> EPS LKAS fault); driver override disengages immediately
     raw_want = CC.latActive and not self.suspended
     if raw_want and (self.active_last or pre_engage_ok):
       self.engaged = True
-    if not raw_want:
+      self.disengage_debounce = 0
+    if self.suspended:
       self.engaged = False
+    elif CC.latActive:
+      self.disengage_debounce = 0
+    else:
+      self.disengage_debounce += 1
+      if self.disengage_debounce >= DISENGAGE_DEBOUNCE_FRAMES:
+        self.engaged = False
     want_active = self.engaged
 
     if want_active and not self.active_last:
