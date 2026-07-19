@@ -60,14 +60,10 @@ class AnglePlanner:
   RATE_ERR_SCALE_BP = [3.0, 15.0]                    # deg wheel
   RATE_ERR_SCALE_V  = [1.0, 2.0]
 
-  # Safety angle-rate ceiling (mirrors CarControllerParams ANGLE_RATE_LIMIT) so the boost can't exceed the outer clip / panda.
-  SAFETY_RATE_BP   = [0., 1.5, 5., 15., 35.]         # m/s
-  SAFETY_RATE_UP   = [1.2, 1.0, 0.72, 0.54, 0.18]    # deg/frame
-  SAFETY_RATE_DOWN = [1.7, 1.5, 1.05, 0.80, 0.22]    # deg/frame
-
-  def __init__(self):
+  def __init__(self, angle_limits):
     self.pos = 0.0
     self.vel = 0.0
+    self.angle_limits = angle_limits   # shared ANGLE_LIMITS (same object apply_std_steer_angle_limits clips to): one source of truth for the rate ceiling
 
   def reset(self, angle: float) -> None:
     self.pos = float(angle)
@@ -81,8 +77,8 @@ class AnglePlanner:
     rate_v = self.MAX_RATE_UP_V if winding_up else self.MAX_RATE_DOWN_V
     base_max_rate  = float(np.interp(v_ego, self.MAX_RATE_BP,  rate_v))
     rate_boost     = float(np.interp(abs(err), self.RATE_ERR_SCALE_BP, self.RATE_ERR_SCALE_V))
-    safety_rate_v  = self.SAFETY_RATE_UP if winding_up else self.SAFETY_RATE_DOWN
-    max_rate       = min(base_max_rate * rate_boost, float(np.interp(v_ego, self.SAFETY_RATE_BP, safety_rate_v)))
+    rate_lim       = self.angle_limits.ANGLE_RATE_LIMIT_UP if winding_up else self.angle_limits.ANGLE_RATE_LIMIT_DOWN
+    max_rate       = min(base_max_rate * rate_boost, float(np.interp(v_ego, rate_lim[0], rate_lim[1])))
     base_max_accel = float(np.interp(v_ego, self.MAX_ACCEL_BP, self.MAX_ACCEL_V))
     max_accel = base_max_accel * float(np.interp(abs(err), self.ERR_SCALE_BP, self.ERR_SCALE_V))
 
@@ -103,7 +99,7 @@ class AnglePlanner:
 
 
 class LkasAngleStateMachine:
-  def __init__(self, CP):
+  def __init__(self, CP, angle_limits):
     self.VM = VehicleModel(CP)
     self.suspended = False
     self.below_release_count = 0
@@ -118,7 +114,7 @@ class LkasAngleStateMachine:
     self.planner_angle_filt = 0.0
     self.last_lkas_button = 0
     self.lkas_button_settled = CAMERA_SETTLE_FRAMES
-    self.planner = AnglePlanner()
+    self.planner = AnglePlanner(angle_limits)
 
   def _target_angle(self, CC, CS) -> float:
     """actuators.steeringAngleDeg with roll compensation faded out approaching a stop."""

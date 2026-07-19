@@ -21,7 +21,8 @@ class CarController(CarControllerBase, SnGCarController):
     SnGCarController.__init__(self, CP, CP_SP)
     self.apply_torque_last = 0
     self.apply_angle_last = 0.0
-    self.angle_sm = LkasAngleStateMachine(CP)
+    self.p = CarControllerParams(CP)
+    self.angle_sm = LkasAngleStateMachine(CP, self.p.ANGLE_LIMITS)
     self.es_disengage_frames = 1000
     self.dash_no_req_frames = 0
     self.dash_active_safe = False
@@ -29,7 +30,6 @@ class CarController(CarControllerBase, SnGCarController):
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
 
-    self.p = CarControllerParams(CP)
     self.packer = CANPacker(DBC[CP.carFingerprint][Bus.pt])
 
   def handle_torque_lateral(self, CC, CS):
