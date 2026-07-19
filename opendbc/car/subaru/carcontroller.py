@@ -25,6 +25,7 @@ class CarController(CarControllerBase, SnGCarController):
     self.angle_sm = LkasAngleStateMachine(CP, self.p.ANGLE_LIMITS)
     self.es_disengage_frames = 1000
     self.dash_no_req_frames = 0
+    self.dash_off_frames = 0
     self.dash_active_safe = False
 
     self.cruise_button_prev = 0
@@ -58,8 +59,17 @@ class CarController(CarControllerBase, SnGCarController):
   def handle_angle_lateral(self, CC, CS):
     # sunnypilot: override / engage shaping + jerk-limited planner; `active` stays True during the disengage taper.
     planner_angle, active = self.angle_sm.update(CC, CS)
-    # hard EPS-invariant guard: ES_LKAS_State must never advertise active without LKAS_Request beyond the bounded engage lead, or the EPS throws a LKAS fault
-    self.dash_no_req_frames = self.dash_no_req_frames + 1 if (self.angle_sm.dash_active and not active) else 0
+    # hard EPS-invariant guard, latched: a flickering dash can't reset the counter (only a request or a sustained disengage clears it), so the dash can never be stranded active past the bounded lead
+    if active:
+      self.dash_no_req_frames = 0
+      self.dash_off_frames = 0
+    elif self.angle_sm.dash_active:
+      self.dash_no_req_frames += 1
+      self.dash_off_frames = 0
+    else:
+      self.dash_off_frames += 1
+      if self.dash_off_frames > 8:
+        self.dash_no_req_frames = 0
     self.dash_active_safe = self.angle_sm.dash_active and self.dash_no_req_frames <= 10
     apply_angle = apply_std_steer_angle_limits(planner_angle, self.apply_angle_last,
                                                CS.out.vEgoRaw, CS.out.steeringAngleDeg,
