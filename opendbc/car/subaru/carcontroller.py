@@ -1,110 +1,27 @@
+import math
 import numpy as np
 from opendbc.can import CANPacker
-from opendbc.car import Bus, DT_CTRL, make_tester_present_msg
-from opendbc.car.common.filter_simple import FirstOrderFilter
-from opendbc.car.lateral import apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
+from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, make_tester_present_msg
+from opendbc.car.lateral import ISO_LATERAL_ACCEL, apply_driver_steer_torque_limits, apply_std_steer_angle_limits, common_fault_avoidance
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.subaru import subarucan
 from opendbc.car.subaru.values import DBC, GLOBAL_ES_ADDR, CanBus, CarControllerParams, SubaruFlags
 
 from opendbc.sunnypilot.car.subaru.stop_and_go import SnGCarController
+from opendbc.sunnypilot.car.subaru.lateral_ext import LkasAngleStateMachine
 
 # FIXME: These limits aren't exact. The real limit is more than likely over a larger time period and
 # involves the total steering angle change rather than rate, but these limits work well for now
 MAX_STEER_RATE = 25  # deg/s
 MAX_STEER_RATE_FRAMES = 7  # tx control frames needed before torque can be cut
 
-SUSPEND_HOLD_FRAMES = 25                 # ~0.5 s
-MADS_ONLY_MAX_STEER_ANGLE = 180          # deg
-PRE_ENGAGE_CLEAN_FRAMES = 5              # ~100 ms
-DISENGAGE_TAPER_FRAMES = 8               # ~160 ms; keeps LKAS_Request from edge-falling
-ENGAGE_DASH_LEAD_FRAMES = 8              # latched engage prevents stranded dash
+# ISO 11270 lateral acceleration bound, with extra allowance for average banked road since the
+# clamp doesn't know the roll. Applied on top of the rate-table limiter: the 720 deg absolute cap
+# permits full lock for parking, and this bounds the commanded angle by physics at road speeds so
+# a slow ramp can never reach a dangerous lateral acceleration on the highway.
+AVERAGE_ROAD_ROLL = 0.06  # ~3.4 degrees, 6% superelevation
+MAX_LATERAL_ACCEL = ISO_LATERAL_ACCEL + (ACCELERATION_DUE_TO_GRAVITY * AVERAGE_ROAD_ROLL)  # ~3.6 m/s^2
 
-# Only smoothing in the pipeline: MPC's steeringAngleDeg -> this LPF -> panda rate limit.
-# Speed-scheduled: heavy smoothing under 15 mph kills the low-speed reversal/wobble; flat 0.20 above.
-PLANNER_ANGLE_LP_ALPHA    = ([0., 4.5, 6.7], [0.02, 0.02, 0.20])   # m/s -> alpha; very heavy under 10 mph (kills low-speed wobble), ramps to 0.20 baseline by 15 mph
-
-class LkasAngleStateMachine:
-  def __init__(self, CP, angle_limits):
-    self.suspended = False
-    self.below_release_count = 0
-    self.pre_engage_clean_frames = 0
-    self.disengage_taper_remaining = 0
-    self.active_last = False
-    self.dash_active = False
-    self.dash_active_frames = 0
-    self.engaged = False
-    self.enabled_last = False
-    self.planner_angle_lpf = FirstOrderFilter(0.0, DT_CTRL/PLANNER_ANGLE_LP_ALPHA[1][0] - DT_CTRL, DT_CTRL)
-
-  def update(self, CC, CS):
-    """Returns (commanded_angle, active) — feed to apply_std_steer_angle_limits."""
-    extreme_angle_mads_only = abs(CS.out.steeringAngleDeg) > MADS_ONLY_MAX_STEER_ANGLE and not CC.enabled
-    target_angle = CC.actuators.steeringAngleDeg
-
-    # only engage gate: not past the MADS-only extreme-angle guard.
-    handoff_clear = not extreme_angle_mads_only
-
-    # require a clean driver handoff before a fresh engage.
-    self.pre_engage_clean_frames = min(self.pre_engage_clean_frames + 1, PRE_ENGAGE_CLEAN_FRAMES) if handoff_clear else 0
-    pre_engage_ok = self.pre_engage_clean_frames >= PRE_ENGAGE_CLEAN_FRAMES
-
-    # ACC drop suspends only when lateral itself ends; MADS keeps LKAS through a brake.
-    if self.enabled_last and not CC.enabled and not CC.latActive:
-      self.suspended = True
-      self.below_release_count = 0
-    self.enabled_last = CC.enabled
-
-    # suspend hysteresis; no driver-torque override — only extreme angle (MADS-only) suspends
-    if self.suspended:
-      if handoff_clear:
-        self.below_release_count += 1
-        if self.below_release_count >= SUSPEND_HOLD_FRAMES:
-          self.suspended = False
-          self.below_release_count = 0
-      else:
-        self.below_release_count = 0
-    else:
-      if extreme_angle_mads_only:
-        self.suspended = True
-        self.below_release_count = 0
-
-    # latch engage: fresh needs clean handoff, continued rides active_last; disengage on latActive drop or suspend.
-    raw_want = CC.latActive and not self.suspended
-    if raw_want and (self.active_last or pre_engage_ok):
-      self.engaged = True
-    if self.suspended or not CC.latActive:
-      self.engaged = False
-    want_active = self.engaged
-
-    if want_active and not self.active_last:
-      self.planner_angle_lpf.x = CS.out.steeringAngleDeg
-
-    # Taper holds LKAS_Request briefly on clean disengage (EyeSight watchdog); bypassed when suspended.
-    self.disengage_taper_remaining = DISENGAGE_TAPER_FRAMES if want_active else max(0, self.disengage_taper_remaining - 1)
-
-    # dash advertises intent (ES_LKAS_State); request is held back a lead so the dash reaches the EPS first.
-    dash_active = want_active or (self.disengage_taper_remaining > 0 and not self.suspended)
-
-    self.dash_active_frames = min(self.dash_active_frames + 1, ENGAGE_DASH_LEAD_FRAMES) if dash_active else 0
-
-    request_active = dash_active and (self.active_last or self.dash_active_frames >= ENGAGE_DASH_LEAD_FRAMES)
-
-    if request_active:
-      # LPF the target with speed-scheduled alpha; apply_std_steer_angle_limits enforces the hard rate cap.
-      alpha = float(np.interp(CS.out.vEgoRaw, *PLANNER_ANGLE_LP_ALPHA))
-      self.planner_angle_lpf.update_alpha(DT_CTRL/alpha - DT_CTRL)
-      self.planner_angle_lpf.update(target_angle)
-      # During taper, chase the live EPS angle for a smooth merge into the inactive path.
-      out_angle = self.planner_angle_lpf.x if want_active else CS.out.steeringAngleDeg
-    else:
-      # inactive or holding for the lead: pin state to measured so LKAS_Request rises from zero error
-      self.planner_angle_lpf.x = CS.out.steeringAngleDeg
-      out_angle = CS.out.steeringAngleDeg
-
-    self.dash_active = dash_active
-    self.active_last = request_active
-    return out_angle, request_active
 
 class CarController(CarControllerBase, SnGCarController):
   def __init__(self, dbc_names, CP, CP_SP):
@@ -114,6 +31,10 @@ class CarController(CarControllerBase, SnGCarController):
     self.apply_angle_last = 0.0
     self.p = CarControllerParams(CP)
     self.angle_sm = LkasAngleStateMachine(CP, self.p.ANGLE_LIMITS)
+    self.es_disengage_frames = 1000
+    self.dash_no_req_frames = 0
+    self.dash_off_frames = 0
+    self.dash_active_safe = False
 
     self.cruise_button_prev = 0
     self.steer_rate_counter = 0
@@ -144,11 +65,29 @@ class CarController(CarControllerBase, SnGCarController):
     return msg
 
   def handle_angle_lateral(self, CC, CS):
-    # sunnypilot: override / engage shaping + speed-scheduled LPF; `active` stays True during the disengage taper.
+    # sunnypilot: override / engage shaping + jerk-limited planner; `active` stays True during the disengage taper.
     planner_angle, active = self.angle_sm.update(CC, CS)
+    # hard EPS-invariant guard, latched: a flickering dash can't reset the counter (only a request or a sustained disengage clears it), so the dash can never be stranded active past the bounded lead
+    if active:
+      self.dash_no_req_frames = 0
+      self.dash_off_frames = 0
+    elif self.angle_sm.dash_active:
+      self.dash_no_req_frames += 1
+      self.dash_off_frames = 0
+    else:
+      self.dash_off_frames += 1
+      if self.dash_off_frames > 8:
+        self.dash_no_req_frames = 0
+    self.dash_active_safe = self.angle_sm.dash_active and self.dash_no_req_frames <= 10
     apply_angle = apply_std_steer_angle_limits(planner_angle, self.apply_angle_last,
                                                CS.out.vEgoRaw, CS.out.steeringAngleDeg,
                                                active, self.p.ANGLE_LIMITS)
+    if active:
+      # lateral-accel clamp: harmless at parking speeds (bound is far beyond full lock),
+      # binding at road speeds where the rate tables alone don't cap the absolute angle
+      v_ego = max(CS.out.vEgoRaw, 1.0)
+      max_angle = math.degrees(self.angle_sm.VM.get_steer_from_curvature(MAX_LATERAL_ACCEL / (v_ego ** 2), v_ego, 0.0))
+      apply_angle = float(np.clip(apply_angle, -max_angle, max_angle))
     self.apply_angle_last = apply_angle
     return subarucan.create_steering_control_angle(self.packer, apply_angle, active)
 
@@ -204,10 +143,15 @@ class CarController(CarControllerBase, SnGCarController):
 
     else:
       if self.CP.flags & SubaruFlags.LKAS_ANGLE:
-        # dash leads the request so an active-dash frame reaches the EPS before LKAS_Request rises
-        lkas_dash_active = self.angle_sm.dash_active and not CS.out.steerFaultPermanent
+        # dash leads the request so an active-dash frame reaches the EPS before LKAS_Request rises; dash_active_safe caps the lead so it's never stranded active without the request
+        lkas_dash_active = self.dash_active_safe and not CS.out.steerFaultPermanent
       else:
-        lkas_dash_active = CC.latActive
+        # torque cars: hold the LKAS dash bit briefly after ACC disengage so MADS-only doesn't flicker it
+        if CC.enabled:
+          self.es_disengage_frames = 0
+        else:
+          self.es_disengage_frames = min(self.es_disengage_frames + 1, 1000)
+        lkas_dash_active = self.es_disengage_frames < 50 or (CS.out.brakePressed and self.es_disengage_frames < 500)
 
       if self.frame % 10 == 0:
         can_sends.append(subarucan.create_es_dashstatus(self.packer, self.frame // 10, CS.es_dashstatus_msg, CC.enabled,
