@@ -44,6 +44,11 @@ class CarInterface(CarInterfaceBase):
       ret.steerControlType = structs.CarParams.SteerControlType.angle
       ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.LKAS_ANGLE.value
       ret.steerAtStandstill = True
+      # The jerk-limited angle planner intentionally trails the model target during turn-in
+      # (measured 20-30 deg for up to 3 s in city corners), and highway sweepers routinely graze
+      # the ISO curvature clamp for well under 2 s. Both trip the 0.4 s saturation heuristic with
+      # false "Turn Exceeds Steering Limit" alerts; genuine sustained limiting still alerts at 2 s.
+      ret.steerLimitTimer = 2.0
 
     elif candidate == CAR.SUBARU_ASCENT:
       ret.steerActuatorDelay = 0.3  # end-to-end angle controller
