@@ -116,11 +116,34 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
       with self.subTest("enable_mads", mads_enabled=enable_mads):
         for mads_button_press in range(4):
           with self.subTest("mads_button_press", button_state=mads_button_press):
+            # settle the dash state at 0 so the press below is a fresh boundary crossing
+            self._rx(self._lkas_button_msg(False, 0))
+            self._rx(self._lkas_button_msg(False, 0))
             self.safety.set_mads_params(enable_mads, False, False)
 
             self._rx(self._lkas_button_msg(False, mads_button_press))
             self.assertEqual(enable_mads and mads_button_press in range(1, 4),
                              self.safety.get_controls_allowed_lateral())
+
+  def test_mads_button_edge_available_after_reengage(self):
+    """Regression: a later press must be able to re-engage lateral after it was revoked.
+
+    The button is inferred from LKAS_Dash_State, so a sticky PRESSED level yields no edge on
+    any press after the first arm; the shell then engages while lateral TX stays blocked and
+    the EPS, starved of its steering message, latches a permanent fault."""
+    self.safety.set_mads_params(True, False, False)
+
+    self._rx(self._lkas_button_msg(False, 0))
+    self._rx(self._lkas_button_msg(False, 2))  # arm: boundary crossing engages
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.safety.set_controls_allowed_lateral(False)  # revoked, e.g. heartbeat mismatch
+
+    self._rx(self._lkas_button_msg(False, 2))  # still armed: no crossing, must not re-engage
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(False, 0))  # next press: crossing gives an edge again
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
 
 
 class TestSubaruStockLongitudinalSafetyBase(TestSubaruSafetyBase):

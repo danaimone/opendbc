@@ -79,7 +79,8 @@
   {.msg = {{MSG_SUBARU_CruiseControl,   alt_bus,         8, 20U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, \
   {.msg = {{MSG_SUBARU_ES_LKAS_State,   SUBARU_CAM_BUS,  8, 10U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}}, \
 
-// LKAS_ANGLE: ACC engagement via ES_Brake/ES_DashStatus (not CruiseControl); needs Steering_2 for angle.
+// LKAS_ANGLE: ACC engagement via ES_Brake/ES_DashStatus (not CruiseControl); needs Steering_2 for angle
+// and ES_LKAS_State for the MADS button (rx hooks only run for whitelisted addresses).
 #define SUBARU_LKAS_ANGLE_RX_CHECKS(alt_main_bus, es_brake_bus)                                                                       \
   {.msg = {{MSG_SUBARU_Throttle,        SUBARU_MAIN_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
   {.msg = {{MSG_SUBARU_Steering_Torque, SUBARU_MAIN_BUS, 8, 50U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
@@ -88,10 +89,12 @@
   {.msg = {{MSG_SUBARU_Brake_Status,    alt_main_bus,    8, 50U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
   {.msg = {{MSG_SUBARU_ES_Brake,        es_brake_bus,    8, 50U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
   {.msg = {{MSG_SUBARU_ES_DashStatus,   SUBARU_CAM_BUS,  8, 10U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
+  {.msg = {{MSG_SUBARU_ES_LKAS_State,   SUBARU_CAM_BUS,  8, 10U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
 
 static bool subaru_gen2 = false;
 static bool subaru_longitudinal = false;
 static bool subaru_lkas_angle = false;
+static bool subaru_lkas_hud_active_prev = false;
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
   return (uint8_t)msg->data[0];
@@ -131,9 +134,14 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
 
   if ((msg->addr == MSG_SUBARU_ES_LKAS_State) && (msg->bus == SUBARU_CAM_BUS)) {
     int lkas_hud = (msg->data[2] & 0x0CU) >> 2U;
-    if ((lkas_hud >= 1) && (lkas_hud <= 3)) {
-      mads_button_press = MADS_BUTTON_PRESSED;
-    }
+    bool lkas_hud_active = (lkas_hud >= 1) && (lkas_hud <= 3);
+    // The LKAS button is hardwired to EyeSight; a press is only visible as a change of the stock
+    // LKAS dash state, and the shell toggles MADS on every such change. Pulse one PRESSED frame per
+    // boundary crossing so each press yields a rising edge. A sticky PRESSED level gives no edge
+    // after the first arm: the shell then engages with lateral TX still blocked, and the EPS,
+    // starved of ES_LKAS_ANGLE (the camera's copy is relay-blocked), latches a permanent fault.
+    mads_button_press = (lkas_hud_active != subaru_lkas_hud_active_prev) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+    subaru_lkas_hud_active_prev = lkas_hud_active;
   }
 
   // ACC engagement: torque cars use CruiseControl; LKAS_ANGLE uses ES_Brake (engaged) + ES_DashStatus (main).
@@ -340,6 +348,7 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
+  subaru_lkas_hud_active_prev = false;
 
   subaru_common_init();
 
