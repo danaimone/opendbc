@@ -2,6 +2,7 @@
 
 #include "opendbc/safety/declarations.h"
 #include "opendbc/safety/modes/subaru_common.h"
+#include "opendbc/safety/modes/subaru_startup.h"
 
 #define SUBARU_STEERING_LIMITS_GENERATOR(steer_max, rate_up, rate_down)               \
   {                                                                                   \
@@ -70,9 +71,11 @@
   {.msg = {{MSG_SUBARU_Brake_Status,    alt_main_bus,    8, 50U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
   {.msg = {{MSG_SUBARU_ES_Brake,        es_brake_bus,    8, 50U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
   {.msg = {{MSG_SUBARU_ES_DashStatus,   SUBARU_CAM_BUS,  8, 10U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
+  {.msg = {{MSG_SUBARU_ES_LKAS_State,   SUBARU_CAM_BUS,  8, 10U,  .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},   \
 
 static bool subaru_gen2 = false;
 static bool subaru_lkas_angle = false;
+static bool subaru_lkas_hud_active_prev = false;
 // subaru_longitudinal removed with the long TX paths: long is disabled in sunnypilot ("subaru: disable alpha long for now")
 
 static uint32_t subaru_get_checksum(const CANPacket_t *msg) {
@@ -110,12 +113,16 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
     update_sample(&angle_meas, angle_meas_new);
   }
 
-  // LKAS_ANGLE tracks op's MADS engage via heartbeat (the stock LKAS HUD desyncs from MADS after an ACC cycle so it can't proxy the button); torque cars keep HUD-based detection
-  if (subaru_lkas_angle) {
-    mads_button_press = heartbeat_engaged_mads ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
-  } else if ((msg->addr == MSG_SUBARU_ES_LKAS_State) && (msg->bus == SUBARU_CAM_BUS)) {
+  if ((msg->addr == MSG_SUBARU_ES_LKAS_State) && (msg->bus == SUBARU_CAM_BUS)) {
     int lkas_hud = (msg->data[2] & 0x0CU) >> 2U;
-    mads_button_press = ((lkas_hud >= 1) && (lkas_hud <= 3)) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+    bool lkas_hud_active = (lkas_hud >= 1) && (lkas_hud <= 3);
+    // The LKAS button is hardwired to EyeSight; a press is only visible as a change of the stock
+    // LKAS dash state, and the shell toggles MADS on every such change. Pulse one PRESSED frame per
+    // boundary crossing so each press yields a rising edge. A sticky PRESSED level gives no edge
+    // after the first arm: the shell then engages with lateral TX still blocked, and the EPS,
+    // starved of ES_LKAS_ANGLE (the camera's copy is relay-blocked), latches a permanent fault.
+    mads_button_press = (lkas_hud_active != subaru_lkas_hud_active_prev) ? MADS_BUTTON_PRESSED : MADS_BUTTON_NOT_PRESSED;
+    subaru_lkas_hud_active_prev = lkas_hud_active;
   }
 
   // ACC engagement: torque cars use CruiseControl; LKAS_ANGLE uses ES_Brake (engaged) + ES_DashStatus (main).
@@ -155,6 +162,7 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
   if ((msg->addr == MSG_SUBARU_Throttle) && (msg->bus == SUBARU_MAIN_BUS)) {
     gas_pressed = msg->data[4] != 0U;
   }
+  subaru_startup_rx(msg);
 }
 
 static bool subaru_tx_hook(const CANPacket_t *msg) {
@@ -188,6 +196,10 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
   bool violation = false;
+
+  if ((msg->addr == 0x6BBU) || (msg->addr == 0x390U)) {
+    violation |= !subaru_startup_tx(msg);
+  }
 
   // steer cmd checks
   if (msg->addr == MSG_SUBARU_ES_LKAS) {
@@ -262,6 +274,13 @@ static safety_config subaru_init(uint16_t param) {
   // Subaru longitudinal is disabled in sunnypilot (see: "subaru: disable alpha long for now"); long TX msg
   // arrays that depend on undefined SUBARU_*_LONG_* macros are omitted until long support is restored.
 
+  static const CanMsg SUBARU_STARTUP_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
+    SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
+    {0x390U, SUBARU_ALT_BUS, 8, .check_relay = false},
+  };
+
   static RxCheck subaru_rx_checks[] = {
     SUBARU_COMMON_RX_CHECKS(SUBARU_MAIN_BUS)
   };
@@ -278,16 +297,34 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_LKAS_ANGLE_RX_CHECKS(SUBARU_ALT_BUS, SUBARU_ALT_BUS)
   };
 
+  static RxCheck subaru_startup_rx_checks[] = {
+    SUBARU_LKAS_ANGLE_RX_CHECKS(SUBARU_ALT_BUS, SUBARU_ALT_BUS)
+    // Factory AVH runs at 1 Hz. The startup gate independently enforces 1.5 s
+    // freshness, plus a 30 ms template age for the actual request.
+    {.msg = {{0x6BBU, SUBARU_ALT_BUS, 8, 1U, .max_counter = 15U, .ignore_quality_flag = true, .ignore_frequency_check = true}, { 0 }, { 0 }}},
+    {.msg = {{0x390U, SUBARU_ALT_BUS, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x32BU, SUBARU_ALT_BUS, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x174U, SUBARU_ALT_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x40U, SUBARU_ALT_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x48U, SUBARU_ALT_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+  };
+
   const uint16_t SUBARU_PARAM_GEN2 = 1;
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
 
   subaru_gen2 = GET_FLAG(param, SUBARU_PARAM_GEN2);
   subaru_lkas_angle = GET_FLAG(param, SUBARU_PARAM_LKAS_ANGLE);
 
+  subaru_lkas_hud_active_prev = false;
   subaru_common_init();
 
-  // TODO: re-enable once more work is done on the limits
-  // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
+  // Longitudinal remains disabled upstream. Reject startup preferences if the
+  // caller asks for the unsupported longitudinal flag as well.
+  bool startup_preferences = false;
+#ifdef ALLOW_DEBUG
+  startup_preferences = GET_FLAG(param, 16U) && subaru_gen2 && subaru_lkas_angle && !GET_FLAG(param, 2U);
+#endif
+  subaru_startup_init(startup_preferences);
 
   safety_config ret;
   // subaru_longitudinal is currently ignored: long is disabled in sunnypilot ("subaru: disable alpha long for now")
@@ -302,6 +339,9 @@ static safety_config subaru_init(uint16_t param) {
   } else {
     ret = subaru_stop_and_go ? BUILD_SAFETY_CFG(subaru_rx_checks, subaru_stop_and_go_tx_msgs) :
                                BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_TX_MSGS);
+  }
+  if (startup_preferences) {
+    ret = BUILD_SAFETY_CFG(subaru_startup_rx_checks, SUBARU_STARTUP_TX_MSGS);
   }
   return ret;
 }

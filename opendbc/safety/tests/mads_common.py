@@ -180,6 +180,11 @@ class MadsSafetyTestBase(unittest.TestCase):
         for pause_lateral_on_brake in (True, False):
           with self.subTest("pause_lateral_on_brake", pause_lateral_on_brake=pause_lateral_on_brake):
             with self.subTest(engage_method):
+              if engage_method == "mads_button":
+                # settle the button in the released state so the press below is a fresh edge
+                # (brands that infer the button from a state signal need a crossing per press)
+                self._rx(self._lkas_button_msg(False))
+                self._rx(self._lkas_button_msg(False))
               self.safety.set_mads_params(enable_mads, False, pause_lateral_on_brake)
 
               # Brake press rising edge

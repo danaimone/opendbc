@@ -18,10 +18,16 @@ class SubaruMsg(enum.IntEnum):
   Wheel_Speeds      = 0x13a
   ES_LKAS           = 0x122
   ES_LKAS_ANGLE     = 0x124
+  ES_Brake          = 0x220
   ES_Distance       = 0x221
+  ES_Status         = 0x222
   ES_DashStatus     = 0x321
   ES_LKAS_State     = 0x322
   ES_Infotainment   = 0x323
+  ES_UDS_Request    = 0x787
+  ES_HighBeamAssist = 0x22A
+  ES_STATIC_1       = 0x325
+  ES_STATIC_2       = 0x121
 
 
 SUBARU_MAIN_BUS = 0
@@ -35,6 +41,18 @@ def lkas_tx_msgs(alt_bus, lkas_msg=SubaruMsg.ES_LKAS):
           [SubaruMsg.ES_DashStatus,     SUBARU_MAIN_BUS],
           [SubaruMsg.ES_LKAS_State,     SUBARU_MAIN_BUS],
           [SubaruMsg.ES_Infotainment,   SUBARU_MAIN_BUS]]
+
+
+def long_tx_msgs(alt_bus):
+  return [[SubaruMsg.ES_Brake,          alt_bus],
+          [SubaruMsg.ES_Status,         alt_bus]]
+
+
+def gen2_long_additional_tx_msgs():
+  return [[SubaruMsg.ES_UDS_Request,    SUBARU_CAM_BUS],
+          [SubaruMsg.ES_HighBeamAssist, SUBARU_MAIN_BUS],
+          [SubaruMsg.ES_STATIC_1,       SUBARU_MAIN_BUS],
+          [SubaruMsg.ES_STATIC_2,       SUBARU_MAIN_BUS]]
 
 
 def fwd_blacklisted_addr(lkas_msg=SubaruMsg.ES_LKAS):
@@ -98,11 +116,34 @@ class TestSubaruSafetyBase(common.CarSafetyTest):
       with self.subTest("enable_mads", mads_enabled=enable_mads):
         for mads_button_press in range(4):
           with self.subTest("mads_button_press", button_state=mads_button_press):
+            # settle the dash state at 0 so the press below is a fresh boundary crossing
+            self._rx(self._lkas_button_msg(False, 0))
+            self._rx(self._lkas_button_msg(False, 0))
             self.safety.set_mads_params(enable_mads, False, False)
 
             self._rx(self._lkas_button_msg(False, mads_button_press))
             self.assertEqual(enable_mads and mads_button_press in range(1, 4),
                              self.safety.get_controls_allowed_lateral())
+
+  def test_mads_button_edge_available_after_reengage(self):
+    """Regression: a later press must be able to re-engage lateral after it was revoked.
+
+    The button is inferred from LKAS_Dash_State, so a sticky PRESSED level yields no edge on
+    any press after the first arm; the shell then engages while lateral TX stays blocked and
+    the EPS, starved of its steering message, latches a permanent fault."""
+    self.safety.set_mads_params(True, False, False)
+
+    self._rx(self._lkas_button_msg(False, 0))
+    self._rx(self._lkas_button_msg(False, 2))  # arm: boundary crossing engages
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self.safety.set_controls_allowed_lateral(False)  # revoked, e.g. heartbeat mismatch
+
+    self._rx(self._lkas_button_msg(False, 2))  # still armed: no crossing, must not re-engage
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(False, 0))  # next press: crossing gives an edge again
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
 
 
 class TestSubaruStockLongitudinalSafetyBase(TestSubaruSafetyBase):
@@ -201,50 +242,21 @@ class TestSubaruGen2AngleStockLongitudinalSafety(TestSubaruStockLongitudinalSafe
   FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE
 
 
-class TestSubaruGen1LongitudinalSafety(TestSubaruLongitudinalSafetyBase, TestSubaruTorqueSafetyBase):
-  FLAGS = SubaruSafetyFlags.LONG
-  TX_MSGS = lkas_tx_msgs(SUBARU_MAIN_BUS) + long_tx_msgs(SUBARU_MAIN_BUS)
-  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                                               SubaruMsg.ES_Infotainment, SubaruMsg.ES_Brake, SubaruMsg.ES_Status,
-                                               SubaruMsg.ES_Distance)}
+class TestSubaruGen2StartupPreferencesSafety(TestSubaruGen2AngleStockLongitudinalSafety):
+  FLAGS = SubaruSafetyFlags.GEN2 | SubaruSafetyFlags.LKAS_ANGLE | SubaruSafetyFlags.STARTUP_PREFERENCES
+  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS, SubaruMsg.ES_LKAS_ANGLE) + [[0x6BB, SUBARU_ALT_BUS], [0x390, SUBARU_ALT_BUS]]
 
 
-class TestSubaruGen2LongitudinalSafety(TestSubaruLongitudinalSafetyBase, TestSubaruGen2TorqueSafetyBase):
-  FLAGS = SubaruSafetyFlags.LONG | SubaruSafetyFlags.GEN2
-  TX_MSGS = lkas_tx_msgs(SUBARU_ALT_BUS) + long_tx_msgs(SUBARU_ALT_BUS) + gen2_long_additional_tx_msgs()
-  FWD_BLACKLISTED_ADDRS = {2: [SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                               SubaruMsg.ES_Infotainment]}
-  RELAY_MALFUNCTION_ADDRS = {SUBARU_MAIN_BUS: (SubaruMsg.ES_LKAS, SubaruMsg.ES_DashStatus, SubaruMsg.ES_LKAS_State,
-                                               SubaruMsg.ES_Infotainment),
-                             SUBARU_ALT_BUS: (SubaruMsg.ES_Brake, SubaruMsg.ES_Status, SubaruMsg.ES_Distance)}
-
-  def _rdbi_msg(self, did: int):
-    return b'\x03\x22' + did.to_bytes(2) + b'\x00\x00\x00\x00'
-
-  def _es_uds_msg(self, msg: bytes):
-    return libsafety_py.make_CANPacket(SubaruMsg.ES_UDS_Request, 2, msg)
-
-  def test_es_uds_message(self):
-    tester_present = b'\x02\x3E\x80\x00\x00\x00\x00\x00'
-    not_tester_present = b"\x03\xAA\xAA\x00\x00\x00\x00\x00"
-
-    button_did = 0x1130
-
-    # Tester present is allowed for gen2 long to keep eyesight disabled
-    self.assertTrue(self._tx(self._es_uds_msg(tester_present)))
-
-    # Non-Tester present is not allowed
-    self.assertFalse(self._tx(self._es_uds_msg(not_tester_present)))
-
-    # Only button_did is allowed to be read via UDS
-    for did in range(0xFFFF):
-      should_tx = (did == button_did)
-      self.assertEqual(self._tx(self._es_uds_msg(self._rdbi_msg(did))), should_tx)
-
-    # any other msg is not allowed
-    for sid in range(0xFF):
-      msg = b'\x03' + sid.to_bytes(1) + b'\x00' * 6
-      self.assertFalse(self._tx(self._es_uds_msg(msg)))
+class TestSubaruLongitudinalDisabled(unittest.TestCase):
+  def test_longitudinal_flag_cannot_enable_transmissions(self):
+    safety = libsafety_py.libsafety
+    for flags in (2, 3, 10, 11, 27):
+      safety.set_safety_hooks(CarParams.SafetyModel.subaru, flags)
+      safety.init_tests()
+      safety.set_controls_allowed(True)
+      for address in (0x220, 0x222, 0x787):
+        for bus in range(3):
+          self.assertFalse(safety.safety_tx_hook(libsafety_py.make_CANPacket(address, bus, bytes(8))))
 
 
 if __name__ == "__main__":
