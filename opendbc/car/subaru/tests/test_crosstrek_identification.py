@@ -24,6 +24,12 @@ class TestCrosstrekIdentification(unittest.TestCase):
     self.assertEqual(match_fw_to_car(self.captured_firmware(), '0' * 17, log=False),
                      (True, {CAR.SUBARU_CROSSTREK_2026}))
 
+  def test_jacob_startup_capture_matches_exactly(self):
+    fw = self.captured_firmware()[:-1]  # Transmission absent from this capture.
+    fw[0].fwVersion = bytes.fromhex('20210800490000000000')
+    self.assertEqual(match_fw_to_car(fw, '0' * 17, log=False),
+                     (True, {CAR.SUBARU_CROSSTREK_2026}))
+
   def test_changed_firmware_rejects_exact_match(self):
     for index in (0, 2, 3, 4):
       with self.subTest(index=index):

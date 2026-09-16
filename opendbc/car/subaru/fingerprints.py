@@ -7,7 +7,10 @@ Ecu = CarParams.Ecu
 FW_VERSIONS = {
   CAR.SUBARU_CROSSTREK_2026: {
     (Ecu.abs, 0x7b0, None): [b'\xa2 &\x17\x00'],
-    (Ecu.fwdCamera, 0x787, None): [b' !\x08\x00I\x13!\x08\x01='],
+    (Ecu.fwdCamera, 0x787, None): [
+      b' !\x08\x00I\x13!\x08\x01=',
+      b' !\x08\x00I\x00\x00\x00\x00\x00',
+    ],
     (Ecu.engine, 0x7a2, None): [b'\x05"b0\x07'],
     (Ecu.transmission, 0x7a3, None): [b'B\x125cP'],
   },
