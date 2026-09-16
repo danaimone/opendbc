@@ -222,6 +222,14 @@ class CAR(Platforms):
     flags=SubaruFlags.LKAS_ANGLE,
   )
 
+  # Identification only. Dimensions inherited from Jacob's jul-angle-based
+  # Crosstrek profile are provisional until this model's driving port is validated.
+  SUBARU_CROSSTREK_2026 = SubaruGen2PlatformConfig(
+    [],
+    CarSpecs(mass=1529, wheelbase=2.67, steerRatio=17),
+    flags=SubaruFlags.LKAS_ANGLE,
+  )
+
 
 SUBARU_VERSION_REQUEST = bytes([uds.SERVICE_TYPE.READ_DATA_BY_IDENTIFIER]) + \
   p16(uds.DATA_IDENTIFIER_TYPE.APPLICATION_DATA_IDENTIFICATION)
