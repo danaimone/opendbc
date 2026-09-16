@@ -2,6 +2,7 @@
 
 #include "opendbc/safety/declarations.h"
 #include "opendbc/safety/modes/subaru_common.h"
+#include "opendbc/safety/modes/subaru_startup.h"
 
 #define SUBARU_STEERING_LIMITS_GENERATOR(steer_max, rate_up, rate_down)               \
   {                                                                                   \
@@ -181,6 +182,7 @@ static void subaru_rx_hook(const CANPacket_t *msg) {
   if ((msg->addr == MSG_SUBARU_Throttle) && (msg->bus == SUBARU_MAIN_BUS)) {
     gas_pressed = msg->data[4] != 0U;
   }
+  subaru_startup_rx(msg);
 }
 
 static bool subaru_tx_hook(const CANPacket_t *msg) {
@@ -214,6 +216,10 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
 
   bool tx = true;
   bool violation = false;
+
+  if ((msg->addr == 0x6BBU) || (msg->addr == 0x390U)) {
+    violation |= !subaru_startup_tx(msg);
+  }
 
   // steer cmd checks
   if (msg->addr == MSG_SUBARU_ES_LKAS) {
@@ -327,6 +333,13 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_GEN2_LONG_ADDITIONAL_TX_MSGS()
   };
 
+  static const CanMsg SUBARU_STARTUP_TX_MSGS[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS_ANGLE)
+    SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
+    {0x390U, SUBARU_ALT_BUS, 8, .check_relay = false},
+  };
+
   static RxCheck subaru_rx_checks[] = {
     SUBARU_COMMON_RX_CHECKS(SUBARU_MAIN_BUS)
   };
@@ -343,6 +356,18 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_LKAS_ANGLE_RX_CHECKS(SUBARU_ALT_BUS, SUBARU_ALT_BUS)
   };
 
+  static RxCheck subaru_startup_rx_checks[] = {
+    SUBARU_LKAS_ANGLE_RX_CHECKS(SUBARU_ALT_BUS, SUBARU_ALT_BUS)
+    // Factory AVH runs at 1 Hz. The startup gate independently enforces 1.5 s
+    // freshness, plus a 30 ms template age for the actual request.
+    {.msg = {{0x6BBU, SUBARU_ALT_BUS, 8, 1U, .max_counter = 15U, .ignore_quality_flag = true, .ignore_frequency_check = true}, { 0 }, { 0 }}},
+    {.msg = {{0x390U, SUBARU_ALT_BUS, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x32BU, SUBARU_ALT_BUS, 8, 10U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x174U, SUBARU_ALT_BUS, 8, 50U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x40U, SUBARU_ALT_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+    {.msg = {{0x48U, SUBARU_ALT_BUS, 8, 100U, .max_counter = 15U, .ignore_quality_flag = true}, { 0 }, { 0 }}},
+  };
+
   const uint16_t SUBARU_PARAM_GEN2 = 1;
   const uint16_t SUBARU_PARAM_LKAS_ANGLE = 8;
 
@@ -352,10 +377,14 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_common_init();
 
+  bool startup_preferences = false;
+
 #ifdef ALLOW_DEBUG
   const uint16_t SUBARU_PARAM_LONGITUDINAL = 2;
   subaru_longitudinal = GET_FLAG(param, SUBARU_PARAM_LONGITUDINAL);
+  startup_preferences = GET_FLAG(param, 16U) && subaru_gen2 && subaru_lkas_angle && !subaru_longitudinal;
 #endif
+  subaru_startup_init(startup_preferences);
 
   safety_config ret;
   if (subaru_lkas_angle) {
@@ -373,6 +402,9 @@ static safety_config subaru_init(uint16_t param) {
     ret = subaru_longitudinal ? BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_LONG_TX_MSGS) :
           subaru_stop_and_go  ? BUILD_SAFETY_CFG(subaru_rx_checks, subaru_stop_and_go_tx_msgs) :
                                 BUILD_SAFETY_CFG(subaru_rx_checks, SUBARU_TX_MSGS);
+  }
+  if (startup_preferences) {
+    ret = BUILD_SAFETY_CFG(subaru_startup_rx_checks, SUBARU_STARTUP_TX_MSGS);
   }
   return ret;
 }

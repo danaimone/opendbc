@@ -69,6 +69,7 @@ class SubaruSafetyFlags(IntFlag):
   LONG = 2
   PREGLOBAL_REVERSED_DRIVER_TORQUE = 4
   LKAS_ANGLE = 8
+  STARTUP_PREFERENCES = 16  # experimental; no automatic activation
 
 
 class SubaruFlags(IntFlag):
