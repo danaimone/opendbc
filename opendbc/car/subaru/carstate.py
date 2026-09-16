@@ -1,4 +1,5 @@
 import copy
+from opendbc.car.subaru.brake_lights import brake_light_status
 from opendbc.can import CANDefine, CANParser
 from opendbc.car import Bus, structs
 from opendbc.car.common.conversions import Conversions as CV
@@ -145,6 +146,10 @@ class CarState(CarStateBase, MadsCarState, SnGCarState):
 
     MadsCarState.update_mads(self, ret, can_parsers)
     SnGCarState.update(self, ret, can_parsers)
+
+    if self.CP.flags & SubaruFlags.LKAS_ANGLE:
+      now_nanos = max(p.last_nonempty_nanos for p in can_parsers.values())
+      ret_sp.brakeLightsAvailable, ret_sp.brakeLightsOn = brake_light_status(cp_cam, cp_es_brake, now_nanos)
 
     return ret, ret_sp
 
