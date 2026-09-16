@@ -105,17 +105,12 @@ class CarInterface(CarInterfaceBase):
     if ret.openpilotLongitudinalControl:
       ret.safetyConfigs[0].safetyParam |= SubaruSafetyFlags.LONG.value
 
-    # Recognition must not enable an unvalidated driving controller.
-    if candidate == CAR.SUBARU_CROSSTREK_2026:
-      ret.dashcamOnly = True
-      ret.safetyConfigs = [get_safety_config(structs.CarParams.SafetyModel.noOutput)]
-
     return ret
 
   @staticmethod
   def _get_params_sp(stock_cp: structs.CarParams, ret: structs.CarParamsSP, candidate, fingerprint: dict[int, dict[int, int]],
                      car_fw: list[structs.CarParams.CarFw], alpha_long: bool, is_release_sp: bool, docs: bool) -> structs.CarParamsSP:
-    stock_cp.dashcamOnly = bool(stock_cp.flags & SubaruFlags.HYBRID) or candidate == CAR.SUBARU_CROSSTREK_2026
+    stock_cp.dashcamOnly = bool(stock_cp.flags & SubaruFlags.HYBRID)
 
     if not stock_cp.flags & (SubaruFlags.GLOBAL_GEN2 | SubaruFlags.HYBRID):
       stock_cp.autoResumeSng = True

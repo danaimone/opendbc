@@ -44,7 +44,7 @@ class TestCrosstrekIdentification(unittest.TestCase):
         del fw[index]
         self.assertEqual(match_fw_to_car(fw, '0' * 17, allow_fuzzy=False, log=False)[1], set())
 
-  def test_identification_remains_non_actuating(self):
+  def test_uses_existing_gen2_angle_safety(self):
     for alpha_long, release, docs in product((False, True), repeat=3):
       with self.subTest(alpha_long=alpha_long, release=release, docs=docs):
         fp = gen_empty_fingerprint()
@@ -52,11 +52,11 @@ class TestCrosstrekIdentification(unittest.TestCase):
         for with_sp in (False, True):
           if with_sp:
             CarInterface.get_params_sp(cp, CAR.SUBARU_CROSSTREK_2026, fp, self.captured_firmware(), alpha_long, release, docs)
-          self.assertTrue(cp.dashcamOnly)
+          self.assertFalse(cp.dashcamOnly)
           self.assertFalse(cp.openpilotLongitudinalControl)
           self.assertEqual(len(cp.safetyConfigs), 1)
-          self.assertEqual(cp.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.noOutput)
-          self.assertEqual(cp.safetyConfigs[0].safetyParam, 0)
+          self.assertEqual(cp.safetyConfigs[0].safetyModel, structs.CarParams.SafetyModel.subaru)
+          self.assertEqual(cp.safetyConfigs[0].safetyParam, 9)
 
   def test_outback_configuration_unchanged(self):
     cp = CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023)

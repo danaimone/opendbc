@@ -27,9 +27,11 @@ def _build_cc(target_angle_deg):
 
 
 class TestAngleLateralAccelClamp(unittest.TestCase):
+  CAR = CAR.SUBARU_OUTBACK_2023
+
   def _build_controller(self):
-    CP = CarInterface.get_non_essential_params(CAR.SUBARU_OUTBACK_2023)
-    CP_SP = CarInterface.get_non_essential_params_sp(CP, CAR.SUBARU_OUTBACK_2023)
+    CP = CarInterface.get_non_essential_params(self.CAR)
+    CP_SP = CarInterface.get_non_essential_params_sp(CP, self.CAR)
     return CarController({}, CP, CP_SP)
 
   def _engage(self, controller, cc, cs):
@@ -74,6 +76,10 @@ class TestAngleLateralAccelClamp(unittest.TestCase):
     # slewing toward the target unimpeded by the clamp
     self.assertGreater(self._max_angle(controller, v_ego), 720.0)
     self.assertGreaterEqual(after, before)
+
+
+class TestCrosstrekAngleLateralAccelClamp(TestAngleLateralAccelClamp):
+  CAR = CAR.SUBARU_CROSSTREK_2026
 
 
 if __name__ == "__main__":
