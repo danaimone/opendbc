@@ -209,16 +209,16 @@ class TestSubaruStartupSafety(unittest.TestCase):
     for request in (0x6BB, 0x390):
       self.assertTrue(self.safety.safety_tx_hook(self.packet(request)))
 
-  def test_every_wheel_cap_and_gear(self):
+  def test_drive_motion_and_other_gears(self):
     for bit in (12, 25, 38, 51):
-      for speed in (0, 350, 351, 8191):
+      for speed in (0, 1, 350, 351, 1000, 8191):
         for gear in (0, 2, 3, 4, 121, 137, 145, 153, 161, 169, 177):
           self.setUp()
           self.data[0x48][3] = gear
           self.data[0x13A] = bytearray((speed << bit).to_bytes(8, 'little'))
           self.ready()
           for request in (0x6BB, 0x390):
-            expected = (gear == 121 and speed <= 350) or (gear == 4 and speed == 0)
+            expected = (gear == 121) or (gear == 4 and speed == 0)
             self.assertEqual(bool(self.safety.safety_tx_hook(self.packet(request))), expected, (bit, speed, gear))
 
   def test_manual_request_retires_setting(self):
