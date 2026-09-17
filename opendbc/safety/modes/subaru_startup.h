@@ -1,6 +1,6 @@
 #pragma once
 
-// Experimental, opt-in parked startup preferences. Does not replace factory
+// Experimental, opt-in startup preferences in Park or low-speed Drive. Does not replace factory
 // traffic or grant general access to either multi-purpose settings message.
 // Requests remain blocked in production builds without ALLOW_DEBUG.
 static const unsigned int SUBARU_STARTUP_ADDRS[] = {0x6BBU, 0x390U, 0x32BU, 0x174U, 0x40U, 0x48U, 0x13AU};
@@ -37,7 +37,7 @@ static void subaru_startup_init(bool enabled) {
 
 static void subaru_startup_rx(const CANPacket_t *msg) {
   if (subaru_startup_enabled && (msg->bus == 1U) && (GET_LEN(msg) == 8U)) {
-    if (safety_get_ts_elapsed(microsecond_timer_get(), subaru_startup_start) > 30000000U) {
+    if (safety_get_ts_elapsed(microsecond_timer_get(), subaru_startup_start) > 120000000U) {
       subaru_startup_aborted = true;
     }
     for (int i = 0; i < 7; i++) {
@@ -61,11 +61,7 @@ static void subaru_startup_rx(const CANPacket_t *msg) {
     if ((msg->addr == 0x390U) && ((msg->data[6] & 0x40U) != 0U)) {
       subaru_startup_done[1] = true;
     }
-    if (((msg->addr == 0x48U) && (msg->data[3] != 4U)) ||
-        ((msg->addr == 0x40U) && (msg->data[4] != 0U)) ||
-        ((msg->addr == 0x13AU) && vehicle_moving)) {
-      subaru_startup_aborted = true;
-    }
+
   }
 }
 
@@ -75,7 +71,7 @@ static bool subaru_startup_tx(const CANPacket_t *msg) {
   const uint32_t elapsed = safety_get_ts_elapsed(now, subaru_startup_start);
   const bool avh_second = (index == 0) && (subaru_startup_avh_count == 1U);
   bool allowed = subaru_startup_enabled && !subaru_startup_aborted && !subaru_startup_done[index] &&
-                 (msg->bus == 1U) && (GET_LEN(msg) == 8U) && (elapsed >= 10000000U) && (elapsed <= 30000000U);
+                 (msg->bus == 1U) && (GET_LEN(msg) == 8U) && (elapsed >= 10000000U) && (elapsed <= 120000000U);
   allowed &= !safety_rx_checks_invalid;
   // A rejected RX frame does not invoke our RX hook. Consult the generic RX
   // status too, so a subsequent corrupt frame cannot leave a usable template.
@@ -100,7 +96,17 @@ static bool subaru_startup_tx(const CANPacket_t *msg) {
   } else {
     allowed &= safety_get_ts_elapsed(now, subaru_startup_ts[index]) <= 30000U;
   }
-  allowed &= !vehicle_moving && (subaru_startup_data[5][3] == 4U) && (subaru_startup_data[4][4] == 0U);
+  const uint8_t gear = subaru_startup_data[5][3];
+  const uint8_t *wheels = subaru_startup_data[6];
+  // Decode each wheel independently; an average must not hide one above the cap.
+  const uint32_t fr = ((uint32_t)wheels[1] | ((uint32_t)wheels[2] << 8U) | ((uint32_t)wheels[3] << 16U)) >> 4U & 0x1FFFU;
+  const uint32_t rr = ((uint32_t)wheels[3] | ((uint32_t)wheels[4] << 8U) | ((uint32_t)wheels[5] << 16U)) >> 1U & 0x1FFFU;
+  const uint32_t rl = ((uint32_t)wheels[4] | ((uint32_t)wheels[5] << 8U) | ((uint32_t)wheels[6] << 16U)) >> 6U & 0x1FFFU;
+  const uint32_t fl = ((uint32_t)wheels[6] | ((uint32_t)wheels[7] << 8U)) >> 3U & 0x1FFFU;
+  const bool parked = (gear == 4U) && !vehicle_moving && (subaru_startup_data[4][4] == 0U);
+  // 350 raw units = 19.95 km/h. Reverse/neutral/manual gears never qualify.
+  const bool driving_away = (gear == 121U) && (fr <= 350U) && (rr <= 350U) && (rl <= 350U) && (fl <= 350U);
+  allowed &= parked || driving_away;
   const unsigned int rpm = ((unsigned int)subaru_startup_data[4][2] | ((unsigned int)subaru_startup_data[4][3] << 8U)) & 0x1FFFU;
   allowed &= (rpm >= 400U) && ((subaru_startup_data[3][2] & 8U) != 0U);
   allowed &= ((subaru_startup_data[0][2] & 3U) == 0U) && ((subaru_startup_data[1][6] & 0x40U) == 0U);

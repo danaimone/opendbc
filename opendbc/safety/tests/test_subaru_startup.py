@@ -27,7 +27,7 @@ class TestSubaruStartupSafety(unittest.TestCase):
     self.safety.set_timer(now)
     for address, data in self.data.items():
       if address not in omit:
-        data[1] = (data[1] + 1) & 15
+        data[1] = (data[1] & 0xf0) | ((data[1] + 1) & 15)
         self.safety.safety_rx_hook(libsafety_py.make_CANPacket(address, 1, self.checksum(address, data)))
 
   def ready(self):
@@ -146,7 +146,7 @@ class TestSubaruStartupSafety(unittest.TestCase):
       self.assertFalse(self.safety.safety_tx_hook(msg))
 
   def test_time_window(self):
-    for time in (9_999_999, 30_000_001):
+    for time in (9_999_999, 120_000_001):
       self.setUp()
       self.receive(time - 100_000)
       self.receive(time)
@@ -193,22 +193,33 @@ class TestSubaruStartupSafety(unittest.TestCase):
 
   def test_timeout_remains_latched_after_timer_wrap(self):
     self.ready()
-    self.receive(31_000_000)
+    self.receive(121_000_000)
     self.receive(10_000_000)
     for request in (0x6BB, 0x390):
       self.assertFalse(self.safety.safety_tx_hook(self.packet(request)))
 
-  def test_motion_or_driver_input_aborts_cycle(self):
-    for address, byte, value in ((0x48, 3, 121), (0x40, 4, 1), (0x13A, 2, 1)):
-      self.setUp()
-      self.ready()
-      old = self.data[address][byte]
-      self.data[address][byte] = value
-      self.receive(10_100_000)
-      self.data[address][byte] = old
-      self.receive(10_200_000)
-      for request in (0x6BB, 0x390):
-        self.assertFalse(self.safety.safety_tx_hook(self.packet(request)))
+  def test_reverse_waits_then_drive_allows(self):
+    self.data[0x48][3] = 3
+    self.ready()
+    for request in (0x6BB, 0x390):
+      self.assertFalse(self.safety.safety_tx_hook(self.packet(request)))
+    self.data[0x48][3] = 121
+    self.data[0x40][4] = 20
+    self.receive(35_000_000)
+    for request in (0x6BB, 0x390):
+      self.assertTrue(self.safety.safety_tx_hook(self.packet(request)))
+
+  def test_every_wheel_cap_and_gear(self):
+    for bit in (12, 25, 38, 51):
+      for speed in (0, 350, 351, 8191):
+        for gear in (0, 2, 3, 4, 121, 137, 145, 153, 161, 169, 177):
+          self.setUp()
+          self.data[0x48][3] = gear
+          self.data[0x13A] = bytearray((speed << bit).to_bytes(8, 'little'))
+          self.ready()
+          for request in (0x6BB, 0x390):
+            expected = (gear == 121 and speed <= 350) or (gear == 4 and speed == 0)
+            self.assertEqual(bool(self.safety.safety_tx_hook(self.packet(request))), expected, (bit, speed, gear))
 
   def test_manual_request_retires_setting(self):
     for address, byte, value in ((0x6BB, 2, 1), (0x390, 6, 0x40)):
