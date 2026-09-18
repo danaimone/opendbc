@@ -6,7 +6,7 @@ from opendbc.car.can_definitions import CanRecvCallable, CanSendCallable
 from opendbc.car.carlog import carlog
 from opendbc.car.structs import CarParams, CarParamsT
 from opendbc.car.fingerprints import eliminate_incompatible_cars, all_legacy_fingerprint_cars
-from opendbc.car.fw_versions import ObdCallback, get_fw_versions_ordered, get_present_ecus, match_fw_to_car
+from opendbc.car.fw_versions import ObdCallback, get_fw_versions, get_fw_versions_ordered, get_present_ecus, match_fw_to_car
 from opendbc.car.mock.values import CAR as MOCK
 from opendbc.car.values import BRANDS
 from opendbc.car.vin import get_vin, is_valid_vin, VIN_UNKNOWN
@@ -85,7 +85,8 @@ def can_fingerprint(can_recv: CanRecvCallable) -> tuple[str | None, dict[int, di
 # **** for use live only ****
 def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback,
                 cached_params: CarParamsT | None,
-                fixed_fingerprint: str | None) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
+                fixed_fingerprint: str | None, subaru_non_obd: bool = False
+                ) -> tuple[str | None, dict, str, list[CarParams.CarFw], CarParams.FingerprintSource, bool]:
   fixed_fingerprint = fixed_fingerprint or os.environ.get('FINGERPRINT', "")
   skip_fw_query = os.environ.get('SKIP_FW_QUERY', False)
   disable_fw_cache = os.environ.get('DISABLE_FW_CACHE', False)
@@ -99,23 +100,32 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
     # themselves uniquely identify the vehicle, and can_fingerprint() still runs after this
     # as an additional safeguard against wrong-car caching.
     if cached_params is not None and cached_params.brand != "mock" and len(cached_params.carFw) > 0 and \
-       not disable_fw_cache:
+       not disable_fw_cache and (not subaru_non_obd or cached_params.brand == "subaru"):
       carlog.warning("Using cached CarParams")
       vin_rx_addr, vin_rx_bus, vin = -1, -1, cached_params.carVin
       car_fw = list(cached_params.carFw)
       cached = True
     else:
       carlog.warning("Getting VIN & FW versions")
-      # enable OBD multiplexing for VIN query
-      # NOTE: this takes ~0.1s and is relied on to allow sendcan subscriber to connect in time
-      set_obd_multiplexing(True)
-      # VIN query only reliably works through OBDII
-      vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, (0, 1))
-      ecu_rx_addrs = get_present_ecus(can_recv, can_send, set_obd_multiplexing)
-      car_fw = get_fw_versions_ordered(can_recv, can_send, set_obd_multiplexing, vin, ecu_rx_addrs)
+      if subaru_non_obd:
+        # Explicit configuration for Subaru harnesses without an OBD connection.
+        # Keep the powertrain bus connected throughout identification; never fall
+        # back to an OBD scan when the non-OBD ECUs cannot identify the car.
+        set_obd_multiplexing(False)
+        time.sleep(0.1)  # allow the sendcan subscriber to connect even if the mux was already off
+        vin_rx_addr, vin_rx_bus, vin = -1, -1, VIN_UNKNOWN
+        car_fw = get_fw_versions(can_recv, can_send, set_obd_multiplexing, query_brand="subaru", non_obd_only=True)
+      else:
+        # enable OBD multiplexing for VIN query
+        # NOTE: this takes ~0.1s and is relied on to allow sendcan subscriber to connect in time
+        set_obd_multiplexing(True)
+        # VIN query only reliably works through OBDII
+        vin_rx_addr, vin_rx_bus, vin = get_vin(can_recv, can_send, (0, 1))
+        ecu_rx_addrs = get_present_ecus(can_recv, can_send, set_obd_multiplexing)
+        car_fw = get_fw_versions_ordered(can_recv, can_send, set_obd_multiplexing, vin, ecu_rx_addrs)
       cached = False
 
-    exact_fw_match, fw_candidates = match_fw_to_car(car_fw, vin)
+    exact_fw_match, fw_candidates = match_fw_to_car(car_fw, vin, allow_fuzzy=not subaru_non_obd)
   else:
     vin_rx_addr, vin_rx_bus, vin = -1, -1, VIN_UNKNOWN
     exact_fw_match, fw_candidates, car_fw = True, set(), []
@@ -135,6 +145,9 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
   # drain CAN socket so we get the latest messages
   can_recv()
   car_fingerprint, finger = can_fingerprint(can_recv)
+
+  if subaru_non_obd:
+    car_fingerprint = None  # this hardware-specific query mode requires a firmware match
 
   exact_match = True
   source = CarParams.FingerprintSource.can
@@ -158,9 +171,10 @@ def fingerprint(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_mu
 
 def get_car(can_recv: CanRecvCallable, can_send: CanSendCallable, set_obd_multiplexing: ObdCallback, alpha_long_allowed: bool,
             is_release: bool, cached_params: CarParamsT | None = None,
-            fixed_fingerprint: str | None = None, init_params_list_sp: list[dict[str, str]] | None = None, is_release_sp: bool = False):
+            fixed_fingerprint: str | None = None, init_params_list_sp: list[dict[str, str]] | None = None, is_release_sp: bool = False,
+            subaru_non_obd: bool = False):
   candidate, fingerprints, vin, car_fw, source, exact_match = fingerprint(can_recv, can_send, set_obd_multiplexing, cached_params,
-                                                                          fixed_fingerprint)
+                                                                          fixed_fingerprint, subaru_non_obd)
 
   if candidate is None:
     carlog.error({"event": "car doesn't match any fingerprints", "fingerprints": repr(fingerprints)})
