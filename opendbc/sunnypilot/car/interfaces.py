@@ -89,6 +89,7 @@ def setup_interfaces(CI, CP: structs.CarParams, CP_SP: structs.CarParamsSP,
   _initialize_tesla_mads_screen_button(CP, CP_SP, params_dict)
   _initialize_radar_tracks(CP, CP_SP, can_recv, can_send)
   _initialize_stop_and_go(CP, CP_SP, params_dict)
+  _initialize_subaru_startup_preferences(CP, CP_SP, params_dict)
   _initialize_toyota(CP, CP_SP, params_dict)
 
 
@@ -166,3 +167,18 @@ def _initialize_toyota(CP: structs.CarParams, CP_SP: structs.CarParamsSP, params
 
     if toyota_stop_and_go_hack and CP.openpilotLongitudinalControl:
       CP_SP.flags |= ToyotaFlagsSP.STOP_AND_GO_HACK.value
+
+
+def _initialize_subaru_startup_preferences(CP, CP_SP, params_dict) -> None:
+  from opendbc.sunnypilot.car.subaru.startup_preferences import startup_preferences_supported
+
+  if not startup_preferences_supported(CP) or params_dict.get("SubaruStartupCycleAuthorized") is not True:
+    return
+  for key, flag, safety_flag in (
+    ("SubaruEnableAVHAtStartup", SubaruFlagsSP.ENABLE_AVH_AT_STARTUP, SubaruSafetyFlagsSP.ENABLE_AVH_AT_STARTUP),
+    ("SubaruDisableStartStopAtStartup", SubaruFlagsSP.DISABLE_START_STOP_AT_STARTUP, SubaruSafetyFlagsSP.DISABLE_START_STOP_AT_STARTUP),
+  ):
+    value = params_dict.get(key, False)
+    if value is True or (type(value) in (str, int) and value in ("1", 1)):
+      CP_SP.flags |= flag
+      CP_SP.safetyParam |= safety_flag

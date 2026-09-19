@@ -2,6 +2,7 @@
 
 #include "opendbc/safety/declarations.h"
 #include "opendbc/safety/modes/subaru_common.h"
+#include "opendbc/safety/modes/subaru_startup.h"
 
 #define SUBARU_STEERING_LIMITS_GENERATOR(steer_max, rate_up, rate_down)               \
   {                                                                                   \
@@ -139,6 +140,10 @@ static bool subaru_tx_hook(const CANPacket_t *msg) {
   bool tx = true;
   bool violation = false;
 
+  if ((msg->addr == 0x6BBU) || (msg->addr == 0x390U)) {
+    violation |= !subaru_startup_tx(msg);
+  }
+
   // steer cmd checks
   if (msg->addr == MSG_SUBARU_ES_LKAS) {
     int desired_torque = ((GET_BYTES(msg, 0, 4) >> 16) & 0x1FFFU);
@@ -178,6 +183,13 @@ static safety_config subaru_init(uint16_t param) {
     SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
   };
 
+  static const CanMsg subaru_startup_tx_msgs[] = {
+    SUBARU_BASE_TX_MSGS(SUBARU_ALT_BUS, MSG_SUBARU_ES_LKAS)
+    SUBARU_COMMON_TX_MSGS(SUBARU_ALT_BUS)
+    {0x6BBU, SUBARU_ALT_BUS, 8, .check_relay = false},
+    {0x390U, SUBARU_ALT_BUS, 8, .check_relay = false},
+  };
+
   static const CanMsg subaru_stop_and_go_tx_msgs[] = {
     SUBARU_BASE_TX_MSGS(SUBARU_MAIN_BUS, MSG_SUBARU_ES_LKAS)
     SUBARU_COMMON_TX_MSGS(SUBARU_MAIN_BUS)
@@ -190,6 +202,18 @@ static safety_config subaru_init(uint16_t param) {
 
   subaru_common_init();
 
+  bool startup_avh = false;
+  bool startup_stop = false;
+#ifdef ALLOW_DEBUG
+  // Alpha longitudinal uses standard safety-param bit 2. Convenience requests
+  // do not enable longitudinal control or broaden actuator permissions.
+  if (subaru_gen2 && !GET_FLAG(param, 2U)) {
+    startup_avh = GET_FLAG(current_safety_param_sp, 2U);
+    startup_stop = GET_FLAG(current_safety_param_sp, 4U);
+  }
+#endif
+  subaru_startup_init(startup_avh, startup_stop);
+
   // TODO: re-enable once more work is done on the limits
   // revert this in the PR that re-enables Subaru longitudinal: https://github.com/commaai/opendbc/pull/3689
 
@@ -198,7 +222,8 @@ static safety_config subaru_init(uint16_t param) {
     static RxCheck subaru_gen2_rx_checks[] = {
       SUBARU_COMMON_RX_CHECKS(SUBARU_ALT_BUS)
     };
-    ret = BUILD_SAFETY_CFG(subaru_gen2_rx_checks, SUBARU_GEN2_TX_MSGS);
+    ret = (subaru_startup_enabled[0] || subaru_startup_enabled[1]) ? BUILD_SAFETY_CFG(subaru_gen2_rx_checks, subaru_startup_tx_msgs) :
+                                        BUILD_SAFETY_CFG(subaru_gen2_rx_checks, SUBARU_GEN2_TX_MSGS);
   } else {
     static RxCheck subaru_rx_checks[] = {
       SUBARU_COMMON_RX_CHECKS(SUBARU_MAIN_BUS)
@@ -212,6 +237,7 @@ static safety_config subaru_init(uint16_t param) {
 const safety_hooks subaru_hooks = {
   .init = subaru_init,
   .rx = subaru_rx_hook,
+  .rx_raw = subaru_startup_rx,
   .tx = subaru_tx_hook,
   .get_counter = subaru_get_counter,
   .get_checksum = subaru_get_checksum,
