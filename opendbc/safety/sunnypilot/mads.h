@@ -90,6 +90,12 @@ inline void m_update_control_state(void) {
     m_mads_state.controls_requested_lateral = true;
   }
 
+  // A button press while already allowed restarts the heartbeat grace, so a press can't land partway through a
+  // previous press's grace and leave the shell engaging just as lateral gets revoked (e.g. a Subaru double tap).
+  if (m_mads_state.mads_button.transition == MADS_EDGE_RISING) {
+    heartbeat_engaged_mads_mismatches = 0U;
+  }
+
   // Primary control blockers - these prevent any further control processing
   if (m_mads_state.acc_main.transition == MADS_EDGE_FALLING) {
     mads_exit_controls(MADS_DISENGAGE_REASON_ACC_MAIN_OFF);

@@ -390,6 +390,30 @@ class MadsSafetyTestBase(unittest.TestCase):
     self.assertFalse(self.safety.get_controls_allowed_lateral(),
                      "Should disengage after exactly 3 mismatches")
 
+  def test_heartbeat_engaged_mads_button_restarts_grace(self):
+    """A button press while lateral is allowed restarts the heartbeat mismatch grace"""
+    try:
+      self._lkas_button_msg(False)
+    except NotImplementedError as err:
+      raise unittest.SkipTest("Skipping test because MADS button is not supported") from err
+    self.safety.set_mads_params(True, False, False)
+    self.safety.set_controls_allowed_lateral(True)
+    self.safety.set_heartbeat_engaged_mads(False)
+
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral())
+
+    self._rx(self._lkas_button_msg(True))
+    self._rx(self._lkas_button_msg(False))
+
+    for _ in range(2):
+      self.safety.mads_heartbeat_engaged_check()
+    self.assertTrue(self.safety.get_controls_allowed_lateral(),
+                    "Button press should have restarted the 3-mismatch grace")
+    self.safety.mads_heartbeat_engaged_check()
+    self.assertFalse(self.safety.get_controls_allowed_lateral())
+
   def test_heartbeat_engaged_mads_reset_on_match(self):
     """Test that mismatch counter resets when heartbeat matches"""
     self.safety.set_mads_params(True, False, False)

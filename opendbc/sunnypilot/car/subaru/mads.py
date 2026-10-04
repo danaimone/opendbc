@@ -21,12 +21,18 @@ LKAS_DASH_STATE_ACTIVE_MAX = 3
 # (e.g. brief reads of 0 or 4 between 2->1). Debounce for 3 frames before propagating.
 LKAS_DASH_STATE_DEBOUNCE_FRAMES = 3
 
+# Each LKAS button press also flips the stock LKA, so a stray tap used to leave stock and MADS in opposite phase.
+# Toggle MADS only on a double tap: two dash-state edges within the window. A double tap also returns stock LKA
+# to where it started. Panda safety still allows lateral on every edge, so this only makes the shell stricter.
+LKAS_DOUBLE_TAP_WINDOW_FRAMES = 150  # 1.5 s at 100 Hz
+
 
 class MadsCarState(MadsCarStateBase):
   def __init__(self, CP: structs.CarParams, CP_SP: structs.CarParamsSP):
     super().__init__(CP, CP_SP)
     self._lkas_button_debounce = 0   # frames the raw value has differed from stable
     self._lkas_button_stable = 0     # last debounce-accepted LKAS_Dash_State value
+    self._lkas_tap_frames = -1       # frames since an unmatched first tap, -1 when none is pending
 
   @staticmethod
   def create_lkas_button_events(cur_btn: int, prev_btn: int) -> list[structs.CarState.ButtonEvent]:
@@ -64,4 +70,17 @@ class MadsCarState(MadsCarStateBase):
 
       self.lkas_button = self._lkas_button_stable
 
-    ret.buttonEvents = self.create_lkas_button_events(self.lkas_button, self.prev_lkas_button)
+    ret.buttonEvents = self.filter_double_tap(self.create_lkas_button_events(self.lkas_button, self.prev_lkas_button))
+
+  def filter_double_tap(self, events: list[structs.CarState.ButtonEvent]) -> list[structs.CarState.ButtonEvent]:
+    if self._lkas_tap_frames >= 0:
+      self._lkas_tap_frames += 1
+      if self._lkas_tap_frames > LKAS_DOUBLE_TAP_WINDOW_FRAMES:
+        self._lkas_tap_frames = -1
+    if not events:
+      return events
+    if self._lkas_tap_frames >= 0:
+      self._lkas_tap_frames = -1
+      return events
+    self._lkas_tap_frames = 0
+    return []
