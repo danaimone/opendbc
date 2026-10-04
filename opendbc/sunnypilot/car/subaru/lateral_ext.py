@@ -28,6 +28,14 @@ DISENGAGE_DEBOUNCE_FRAMES = 4            # ~80 ms; bridge brief latActive flicke
 # short dash lead before LKAS_Request rises; engage is latched so the request always follows and the dash is never stranded active
 ENGAGE_DASH_LEAD_FRAMES = 8
 
+# CC.left/rightBlinker are only set while a lane change is in progress (>= 20 mph). A nudge toward the new lane agrees with
+# the plan, so it isn't an override; pushing against it still is, as is a very hard push, or any push toward an occupied
+# blind spot (the lane change is held there and the model keeps the lane). Resume still needs light hands.
+LANE_CHANGE_NUDGE_MAX_TORQUE = 400
+# Let the planner build angle faster during a lane change: the highway accel bound lags the maneuver by 0.2-0.5 s.
+LANE_CHANGE_ACCEL_SCALE_BP = [10., 15.]  # m/s
+LANE_CHANGE_ACCEL_SCALE_V  = [1.0, 2.0]
+
 # Roll compensation in actuators.steeringAngleDeg diverges as v -> 0 and cranks the wheel at stops on
 # crowned roads; fade to a roll-free target rebuilt from actuators.curvature when approaching a stop.
 ROLL_COMP_FADE_BP = [2.0, 8.0]           # m/s
@@ -69,7 +77,7 @@ class AnglePlanner:
     self.pos = float(angle)
     self.vel = 0.0
 
-  def update(self, target: float, v_ego: float) -> float:
+  def update(self, target: float, v_ego: float, accel_scale: float = 1.0) -> float:
     err = float(target) - self.pos
 
     # moving away from center uses UP limits, unwinding toward center uses the looser DOWN limits
@@ -80,7 +88,7 @@ class AnglePlanner:
     rate_lim       = self.angle_limits.ANGLE_RATE_LIMIT_UP if winding_up else self.angle_limits.ANGLE_RATE_LIMIT_DOWN
     max_rate       = min(base_max_rate * rate_boost, float(np.interp(v_ego, rate_lim[0], rate_lim[1])))
     base_max_accel = float(np.interp(v_ego, self.MAX_ACCEL_BP, self.MAX_ACCEL_V))
-    max_accel = base_max_accel * float(np.interp(abs(err), self.ERR_SCALE_BP, self.ERR_SCALE_V))
+    max_accel = base_max_accel * float(np.interp(abs(err), self.ERR_SCALE_BP, self.ERR_SCALE_V)) * accel_scale
 
     # v^2 = 2 a d  ->  brake distance to reach 0 from |vel| at max_accel
     brake_dist = (self.vel * self.vel) / (2.0 * max_accel) if max_accel > 0.0 else 0.0
@@ -128,6 +136,10 @@ class LkasAngleStateMachine:
     extreme_angle = abs(CS.out.steeringAngleDeg) > MADS_ONLY_MAX_STEER_ANGLE
     extreme_angle_mads_only = extreme_angle and not CC.enabled
     target_angle = self._target_angle(CC, CS)
+    lane_change_dir = 1. if CC.leftBlinker else (-1. if CC.rightBlinker else 0.)
+    lane_change_blindspot = CS.out.leftBlindspot if lane_change_dir > 0. else CS.out.rightBlindspot
+    lane_change_nudge = (CS.out.steeringTorque * lane_change_dir > 0. and torque < LANE_CHANGE_NUDGE_MAX_TORQUE
+                         and not lane_change_blindspot)
 
     # handoff is clear only when torque, wheel motion, and plan-vs-hand disagreement are all low
     handoff_clear = (torque < DRIVER_OVERRIDE_TORQUE_RELEASE
@@ -159,7 +171,7 @@ class LkasAngleStateMachine:
       else:
         self.below_release_count = 0
     else:
-      if torque > DRIVER_OVERRIDE_TORQUE or extreme_angle_mads_only:
+      if (torque > DRIVER_OVERRIDE_TORQUE and not lane_change_nudge) or extreme_angle_mads_only:
         self.suspended = True
         self.below_release_count = 0
 
@@ -208,7 +220,8 @@ class LkasAngleStateMachine:
       target = self.planner_angle_filt if want_active else CS.out.steeringAngleDeg
 
       # Stage 2: jerk-limited trajectory (accel bound also shapes engage pull-in).
-      out_angle = self.planner.update(target, CS.out.vEgoRaw)
+      accel_scale = float(np.interp(CS.out.vEgoRaw, LANE_CHANGE_ACCEL_SCALE_BP, LANE_CHANGE_ACCEL_SCALE_V)) if lane_change_dir else 1.
+      out_angle = self.planner.update(target, CS.out.vEgoRaw, accel_scale)
     else:
       # inactive or holding for the lead: pin to measured so LKAS_Request rises from zero error, not a step
       self.planner_angle_filt = CS.out.steeringAngleDeg

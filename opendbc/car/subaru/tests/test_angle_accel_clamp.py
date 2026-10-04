@@ -15,6 +15,8 @@ def _build_cs(v_ego_raw, steering_angle_deg):
     steeringTorque=0.0,
     standstill=False,
     steeringPressed=False,
+    leftBlindspot=False,
+    rightBlindspot=False,
   ))
 
 
@@ -22,6 +24,8 @@ def _build_cc(target_angle_deg):
   return SimpleNamespace(
     latActive=True,
     enabled=True,
+    leftBlinker=False,
+    rightBlinker=False,
     actuators=SimpleNamespace(steeringAngleDeg=target_angle_deg, curvature=0.0),
   )
 
